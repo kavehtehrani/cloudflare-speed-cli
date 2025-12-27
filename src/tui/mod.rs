@@ -18,6 +18,7 @@ use ratatui::{
     Terminal,
 };
 use std::{io, time::Duration, time::Instant};
+use std::process::Command;
 use tokio::sync::mpsc;
 
 struct UiState {
@@ -70,6 +71,12 @@ struct UiState {
     as_org: Option<String>,
     auto_save: bool,
     last_exported_path: Option<String>, // Full path of last exported file (for clipboard)
+    // Network interface information
+    interface_name: Option<String>,
+    network_name: Option<String>, // SSID for wireless, or network name
+    is_wireless: Option<bool>,
+    interface_mac: Option<String>,
+    link_speed_mbps: Option<u64>,
 }
 
 impl Default for UiState {
@@ -117,6 +124,11 @@ impl Default for UiState {
             as_org: None,
             auto_save: true,
             last_exported_path: None,
+            interface_name: None,
+            network_name: None,
+            is_wireless: None,
+            interface_mac: None,
+            link_speed_mbps: None,
         }
     }
 }
@@ -190,6 +202,123 @@ impl UiState {
     }
 }
 
+/// Gather network interface information
+fn gather_network_info() -> (Option<String>, Option<String>, Option<bool>, Option<String>, Option<u64>) {
+    // Get default interface by trying to connect to a remote address
+    let interface_name = get_default_interface();
+    
+    if let Some(ref iface) = interface_name {
+        let is_wireless = check_if_wireless(iface);
+        let network_name = if is_wireless.unwrap_or(false) {
+            get_wireless_ssid(iface)
+        } else {
+            None
+        };
+        let mac = get_interface_mac(iface);
+        let speed = get_interface_speed(iface);
+        (Some(iface.clone()), network_name, is_wireless, mac, speed)
+    } else {
+        (None, None, None, None, None)
+    }
+}
+
+/// Get the default network interface name
+fn get_default_interface() -> Option<String> {
+    // Try to get interface from default route
+    if let Ok(output) = Command::new("ip")
+        .args(&["route", "show", "default"])
+        .output()
+    {
+        if let Ok(output_str) = String::from_utf8(output.stdout) {
+            // Look for "dev <interface>" in the output
+            for line in output_str.lines() {
+                if let Some(dev_pos) = line.find("dev ") {
+                    let rest = &line[dev_pos + 4..];
+                    if let Some(space_pos) = rest.find(' ') {
+                        return Some(rest[..space_pos].to_string());
+                    } else {
+                        return Some(rest.to_string());
+                    }
+                }
+            }
+        }
+    }
+    
+    // Fallback: try to find first non-loopback interface
+    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str != "lo" && !name_str.starts_with("docker") && !name_str.starts_with("br-") {
+                return Some(name_str.to_string());
+            }
+        }
+    }
+    
+    None
+}
+
+/// Check if interface is wireless
+fn check_if_wireless(iface: &str) -> Option<bool> {
+    // Check if /sys/class/net/<iface>/wireless exists
+    let wireless_path = format!("/sys/class/net/{}/wireless", iface);
+    Some(std::path::Path::new(&wireless_path).exists())
+}
+
+/// Get wireless SSID for an interface
+fn get_wireless_ssid(iface: &str) -> Option<String> {
+    // Try iwgetid first (most reliable)
+    if let Ok(output) = Command::new("iwgetid")
+        .arg("-r")
+        .arg(iface)
+        .output()
+    {
+        if let Ok(ssid) = String::from_utf8(output.stdout) {
+            let ssid = ssid.trim().to_string();
+            if !ssid.is_empty() {
+                return Some(ssid);
+            }
+        }
+    }
+    
+    // Fallback: try iw command
+    if let Ok(output) = Command::new("iw")
+        .args(&["dev", iface, "info"])
+        .output()
+    {
+        if let Ok(output_str) = String::from_utf8(output.stdout) {
+            for line in output_str.lines() {
+                if line.trim().starts_with("ssid ") {
+                    let ssid = line.trim().strip_prefix("ssid ").unwrap_or("").trim();
+                    if !ssid.is_empty() {
+                        return Some(ssid.to_string());
+                    }
+                }
+            }
+        }
+    }
+    
+    None
+}
+
+/// Get MAC address of interface
+fn get_interface_mac(iface: &str) -> Option<String> {
+    let mac_path = format!("/sys/class/net/{}/address", iface);
+    std::fs::read_to_string(mac_path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Get link speed in Mbps
+fn get_interface_speed(iface: &str) -> Option<u64> {
+    let speed_path = format!("/sys/class/net/{}/speed", iface);
+    std::fs::read_to_string(speed_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&speed| speed > 0 && speed < 1_000_000) // Sanity check
+}
+
 pub async fn run(args: Cli) -> Result<()> {
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
@@ -205,6 +334,14 @@ pub async fn run(args: Cli) -> Result<()> {
         ..Default::default()
     };
     state.history = crate::storage::load_recent(20).unwrap_or_default();
+    
+    // Gather network interface information
+    let (interface_name, network_name, is_wireless, interface_mac, link_speed_mbps) = gather_network_info();
+    state.interface_name = interface_name;
+    state.network_name = network_name;
+    state.is_wireless = is_wireless;
+    state.interface_mac = interface_mac;
+    state.link_speed_mbps = link_speed_mbps;
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -854,6 +991,33 @@ fn draw_dashboard(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
             Span::raw(ip_version),
         ]),
         Line::from(vec![
+            Span::styled("Interface: ", Style::default().fg(Color::Gray)),
+            Span::raw(state.interface_name.as_deref().unwrap_or("-")),
+            Span::raw(" ("),
+            Span::raw(if state.is_wireless.unwrap_or(false) { "Wireless" } else { "Wired" }),
+            Span::raw(")"),
+        ]),
+        Line::from(vec![
+            Span::styled("Network: ", Style::default().fg(Color::Gray)),
+            Span::raw(
+                state.network_name.as_deref()
+                    .or_else(|| state.interface_name.as_deref())
+                    .unwrap_or("-")
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("MAC address: ", Style::default().fg(Color::Gray)),
+            Span::raw(state.interface_mac.as_deref().unwrap_or("-")),
+        ]),
+        Line::from(vec![
+            Span::styled("Link speed: ", Style::default().fg(Color::Gray)),
+            Span::raw(
+                state.link_speed_mbps
+                    .map(|s| format!("{} Mbps", s))
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+        ]),
+        Line::from(vec![
             Span::styled("Server location: ", Style::default().fg(Color::Gray)),
             Span::raw(state.server.as_deref().unwrap_or("-")),
         ]),
@@ -1020,6 +1184,21 @@ fn draw_dashboard_compact(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
             Span::raw("   "),
             Span::styled("Paused: ", Style::default().fg(Color::Gray)),
             Span::raw(format!("{}", state.paused)),
+        ]),
+        Line::from(vec![
+            Span::styled("Interface: ", Style::default().fg(Color::Gray)),
+            Span::raw(state.interface_name.as_deref().unwrap_or("-")),
+            Span::raw(" ("),
+            Span::raw(if state.is_wireless.unwrap_or(false) { "Wireless" } else { "Wired" }),
+            Span::raw(")"),
+        ]),
+        Line::from(vec![
+            Span::styled("Network: ", Style::default().fg(Color::Gray)),
+            Span::raw(
+                state.network_name.as_deref()
+                    .or_else(|| state.interface_name.as_deref())
+                    .unwrap_or("-")
+            ),
         ]),
         Line::from(vec![
             Span::styled("IP/Colo: ", Style::default().fg(Color::Gray)),
