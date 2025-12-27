@@ -93,20 +93,17 @@ jobs:
         run: |
           cargo deb --target ${{ matrix.target }} --features tui
 
-      - name: Install cargo-rpm (Linux only)
-        if: matrix.os == 'ubuntu-22.04' && (matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu')
+      - name: Install cargo-rpm (Linux x86_64 only)
+        if: matrix.os == 'ubuntu-22.04' && matrix.target == 'x86_64-unknown-linux-gnu'
         run: cargo install cargo-rpm
 
-      - name: Build RPM package (Linux x86_64 and ARM64)
-        if: matrix.os == 'ubuntu-22.04' && (matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu')
+      - name: Build RPM package (Linux x86_64 only - cargo-rpm doesn't support cross-compilation)
+        if: matrix.os == 'ubuntu-22.04' && matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
           # cargo-rpm doesn't support --features, so rebuild with features first
           cargo build --release --features tui --target ${{ matrix.target }}
           # Now build RPM (it will use the existing binary)
           cargo rpm build --target ${{ matrix.target }}
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
 
       - name: Create archive
         shell: bash
