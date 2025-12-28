@@ -17,7 +17,7 @@ A CLI tool that displays network speed test results from Cloudflare's speed test
 
 ## Installation
 
-### From Source 
+### From Source
 
 My preferred way if you have cargo installed
 
@@ -25,7 +25,7 @@ My preferred way if you have cargo installed
 cargo install --git https://github.com/kavehtehrani/cloudflare-speed-cli --features tui
 ```
 
-### Installation Script 
+### Installation Script
 
 For the lazy:
 
@@ -33,10 +33,9 @@ For the lazy:
 curl -fsSL https://raw.githubusercontent.com/kavehtehrani/cloudflare-speed-cli/main/install.sh | sh
 ```
 
-
 ### Binaries
 
-Download the static binary for your system from the 
+Download the static binary for your system from the
 [latest release](https://github.com/kavehtehrani/cloudflare-speed-cli/releases).
 
 ## Usage
