@@ -146,7 +146,6 @@ async fn run_text(args: Cli) -> Result<()> {
     let engine = TestEngine::new(cfg);
     let handle = tokio::spawn(async move { engine.run(evt_tx, ctrl_rx).await });
 
-    // Minimal progress output for M1.
     while let Some(ev) = evt_rx.recv().await {
         match ev {
             TestEvent::PhaseStarted { phase } => {

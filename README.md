@@ -62,6 +62,10 @@ cloudflare-speed-cli --json
 
 Uses endpoints from https://speed.cloudflare.com/
 
+## Outstanding Issues
+
+* Network information on Windows is incomplete. I haven't used Windows in many years and unless there's demand for it I likely won't implement this part. Feel free to open a PR or an issue and we can chat. Honestly the only reason there's a Windows binary at all is because ['cargo-dist'](https://github.com/axodotdev/cargo-dist) made it so easy to do so.
+
 ## Contributing
 
 Contributions and comments are very welcome! Please feel free to open issues or pull requests.
