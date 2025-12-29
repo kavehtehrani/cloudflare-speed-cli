@@ -1,6 +1,6 @@
 [package]
 name = "cloudflare-speed-cli_"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["kavehtehrani <codemonkey13x@gmail.com>"]
 description = "CLI tool for Cloudflare speed testing with TUI interface"

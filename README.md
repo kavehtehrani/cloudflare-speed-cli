@@ -14,6 +14,7 @@ A CLI tool that displays network speed test results from Cloudflare's speed test
 - **History**: View and manage past test results
 - **Export**: Save results as JSON
 - **Text/JSON Modes**: Headless operation for scripting
+- **Interface Binding**: Bind to specific network interface or source IP for Multi-WAN, Site-to-Site, Proxy, and WireGuard testing
 
 ## Installation
 
@@ -59,6 +60,25 @@ To see all options:
 ```bash
 cloudflare-speed-cli --help
 ```
+
+### Interface Binding
+
+Bind to a specific network interface or source IP address for testing Multi-WAN, Site-to-Site, Proxy, and WireGuard configurations:
+
+```bash
+# Bind to a specific interface
+cloudflare-speed-cli --interface=ens18
+
+# Bind to a specific source IP
+cloudflare-speed-cli --source=192.168.10.0
+```
+
+This is useful for:
+
+- **Multi-WAN**: Test throughput on specific WAN interfaces
+- **Site-to-Site VPNs**: Test performance through specific VPN tunnels
+- **Proxy configurations**: Test through specific proxy interfaces
+- **WireGuard**: Test performance on specific WireGuard interfaces
 
 ## Source
 
