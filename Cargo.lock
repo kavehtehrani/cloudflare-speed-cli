@@ -286,8 +286,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "cloudflare-speed-cli_"
-version = "0.3.0"
+name = "cloudflare-speed-cli"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "arboard",
