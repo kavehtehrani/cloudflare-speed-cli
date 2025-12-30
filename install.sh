@@ -3,7 +3,7 @@ set -eu
 
 REPO="kavehtehrani/cloudflare-speed-cli"
 BIN="cloudflare-speed-cli"
-PKG_NAME="cloudflare-speed-cli_"
+PKG_NAME="cloudflare-speed-cli"
 
 echo "Fetching latest version..." >&2
 VERSION="${VERSION:-$(curl -fsSL \

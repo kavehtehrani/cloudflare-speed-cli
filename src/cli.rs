@@ -61,16 +61,16 @@ pub struct Cli {
     #[arg(long)]
     pub experimental: bool,
 
-    /// Export full JSON result to a file
+    /// Export results as JSON
     #[arg(long)]
     pub export_json: Option<std::path::PathBuf>,
 
-    /// Export a one-line CSV summary to a file
+    /// Export results as CSV
     #[arg(long)]
     pub export_csv: Option<std::path::PathBuf>,
 
-    /// Automatically save test results (default: true)
-    #[arg(long, default_value_t = true)]
+    /// Use --auto-save true or --auto-save false to override (default: true)
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub auto_save: bool,
 
     /// Bind to a specific network interface (e.g., ens18, eth0)
@@ -150,8 +150,10 @@ async fn run_json(args: Cli) -> Result<()> {
     handle_exports(&args, &result)?;
 
     println!("{}", serde_json::to_string_pretty(&result)?);
-    if let Ok(p) = crate::storage::save_run(&result) {
-        eprintln!("Saved: {}", p.display());
+    if args.auto_save {
+        if let Ok(p) = crate::storage::save_run(&result) {
+            eprintln!("Saved: {}", p.display());
+        }
     }
     Ok(())
 }
@@ -250,8 +252,10 @@ async fn run_text(args: Cli) -> Result<()> {
             exp.target
         );
     }
-    if let Ok(p) = crate::storage::save_run(&result) {
-        eprintln!("Saved: {}", p.display());
+    if args.auto_save {
+        if let Ok(p) = crate::storage::save_run(&result) {
+            eprintln!("Saved: {}", p.display());
+        }
     }
     Ok(())
 }
