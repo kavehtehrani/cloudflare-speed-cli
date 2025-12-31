@@ -171,27 +171,68 @@ async fn run_text(args: Cli) -> Result<()> {
     let engine = TestEngine::new(cfg);
     let handle = tokio::spawn(async move { engine.run(evt_tx, ctrl_rx).await });
 
+    // Collect raw samples for metric computation (same as TUI)
+    let run_start = std::time::Instant::now();
+    let mut idle_latency_samples: Vec<f64> = Vec::new();
+    let mut loaded_dl_latency_samples: Vec<f64> = Vec::new();
+    let mut loaded_ul_latency_samples: Vec<f64> = Vec::new();
+    let mut dl_points: Vec<(f64, f64)> = Vec::new();
+    let mut ul_points: Vec<(f64, f64)> = Vec::new();
+
     while let Some(ev) = evt_rx.recv().await {
         match ev {
             TestEvent::PhaseStarted { phase } => {
                 eprintln!("== {phase:?} ==");
             }
             TestEvent::ThroughputTick {
-                phase, bps_instant, ..
+                phase,
+                bps_instant,
+                bytes_total: _,
             } => {
                 if matches!(
                     phase,
                     crate::model::Phase::Download | crate::model::Phase::Upload
                 ) {
-                    eprintln!("{phase:?}: {:.2} Mbps", (bps_instant * 8.0) / 1_000_000.0);
+                    let elapsed = run_start.elapsed().as_secs_f64();
+                    let mbps = (bps_instant * 8.0) / 1_000_000.0;
+                    eprintln!("{phase:?}: {:.2} Mbps", mbps);
+
+                    // Collect throughput points for metrics
+                    match phase {
+                        crate::model::Phase::Download => {
+                            dl_points.push((elapsed, mbps));
+                        }
+                        crate::model::Phase::Upload => {
+                            ul_points.push((elapsed, mbps));
+                        }
+                        _ => {}
+                    }
                 }
             }
             TestEvent::LatencySample {
-                phase, ok, rtt_ms, ..
+                phase,
+                ok,
+                rtt_ms,
+                during,
             } => {
-                if phase == crate::model::Phase::IdleLatency && ok {
+                if ok {
                     if let Some(ms) = rtt_ms {
-                        eprintln!("Idle latency: {:.1} ms", ms);
+                        match (phase, during) {
+                            (crate::model::Phase::IdleLatency, None) => {
+                                eprintln!("Idle latency: {:.1} ms", ms);
+                                idle_latency_samples.push(ms);
+                            }
+                            (
+                                crate::model::Phase::Download,
+                                Some(crate::model::Phase::Download),
+                            ) => {
+                                loaded_dl_latency_samples.push(ms);
+                            }
+                            (crate::model::Phase::Upload, Some(crate::model::Phase::Upload)) => {
+                                loaded_ul_latency_samples.push(ms);
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -226,29 +267,60 @@ async fn run_text(args: Cli) -> Result<()> {
     if let Some(server) = enriched.server.as_deref() {
         println!("Server: {server}");
     }
-    println!("Download: {:.2} Mbps", enriched.download.mbps);
-    println!("Upload:   {:.2} Mbps", enriched.upload.mbps);
+
+    // Compute and display throughput metrics (mean, median, p25, p75)
+    let (dl_mean, dl_median, dl_p25, dl_p75) =
+        crate::metrics::compute_throughput_metrics(&dl_points)
+            .context("insufficient download throughput data to compute metrics")?;
     println!(
-        "Idle latency p50/p90/p99: {:.1}/{:.1}/{:.1} ms (loss {:.1}%, jitter {:.1} ms)",
-        enriched.idle_latency.p50_ms.unwrap_or(f64::NAN),
-        enriched.idle_latency.p90_ms.unwrap_or(f64::NAN),
-        enriched.idle_latency.p99_ms.unwrap_or(f64::NAN),
+        "Download: avg {:.2} med {:.2} p25 {:.2} p75 {:.2}",
+        dl_mean, dl_median, dl_p25, dl_p75
+    );
+
+    let (ul_mean, ul_median, ul_p25, ul_p75) =
+        crate::metrics::compute_throughput_metrics(&ul_points)
+            .context("insufficient upload throughput data to compute metrics")?;
+    println!(
+        "Upload:   avg {:.2} med {:.2} p25 {:.2} p75 {:.2}",
+        ul_mean, ul_median, ul_p25, ul_p75
+    );
+
+    // Compute and display latency metrics (mean, median, p25, p75)
+    let (idle_mean, idle_median, idle_p25, idle_p75) =
+        crate::metrics::compute_latency_metrics(&idle_latency_samples)
+            .context("insufficient idle latency data to compute metrics")?;
+    println!(
+        "Idle latency: avg {:.1} med {:.1} p25 {:.1} p75 {:.1} ms (loss {:.1}%, jitter {:.1} ms)",
+        idle_mean,
+        idle_median,
+        idle_p25,
+        idle_p75,
         enriched.idle_latency.loss * 100.0,
         enriched.idle_latency.jitter_ms.unwrap_or(f64::NAN)
     );
+
+    let (dl_lat_mean, dl_lat_median, dl_lat_p25, dl_lat_p75) =
+        crate::metrics::compute_latency_metrics(&loaded_dl_latency_samples)
+            .context("insufficient loaded download latency data to compute metrics")?;
     println!(
-        "Loaded latency (download) p50/p90/p99: {:.1}/{:.1}/{:.1} ms (loss {:.1}%, jitter {:.1} ms)",
-        enriched.loaded_latency_download.p50_ms.unwrap_or(f64::NAN),
-        enriched.loaded_latency_download.p90_ms.unwrap_or(f64::NAN),
-        enriched.loaded_latency_download.p99_ms.unwrap_or(f64::NAN),
+        "Loaded latency (download): avg {:.1} med {:.1} p25 {:.1} p75 {:.1} ms (loss {:.1}%, jitter {:.1} ms)",
+        dl_lat_mean,
+        dl_lat_median,
+        dl_lat_p25,
+        dl_lat_p75,
         enriched.loaded_latency_download.loss * 100.0,
         enriched.loaded_latency_download.jitter_ms.unwrap_or(f64::NAN)
     );
+
+    let (ul_lat_mean, ul_lat_median, ul_lat_p25, ul_lat_p75) =
+        crate::metrics::compute_latency_metrics(&loaded_ul_latency_samples)
+            .context("insufficient loaded upload latency data to compute metrics")?;
     println!(
-        "Loaded latency (upload) p50/p90/p99: {:.1}/{:.1}/{:.1} ms (loss {:.1}%, jitter {:.1} ms)",
-        enriched.loaded_latency_upload.p50_ms.unwrap_or(f64::NAN),
-        enriched.loaded_latency_upload.p90_ms.unwrap_or(f64::NAN),
-        enriched.loaded_latency_upload.p99_ms.unwrap_or(f64::NAN),
+        "Loaded latency (upload): avg {:.1} med {:.1} p25 {:.1} p75 {:.1} ms (loss {:.1}%, jitter {:.1} ms)",
+        ul_lat_mean,
+        ul_lat_median,
+        ul_lat_p25,
+        ul_lat_p75,
         enriched.loaded_latency_upload.loss * 100.0,
         enriched.loaded_latency_upload.jitter_ms.unwrap_or(f64::NAN)
     );

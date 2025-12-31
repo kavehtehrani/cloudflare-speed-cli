@@ -1,5 +1,6 @@
 mod cli;
 mod engine;
+mod metrics;
 mod model;
 mod network;
 mod stats;

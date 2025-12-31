@@ -80,7 +80,10 @@ fn parse_host_port(url: &str) -> Result<(String, u16)> {
     Ok((host.to_string(), port))
 }
 
-pub async fn run_udp_like_loss_probe(turn: &TurnInfo, cfg: &RunConfig) -> Result<ExperimentalUdpSummary> {
+pub async fn run_udp_like_loss_probe(
+    turn: &TurnInfo,
+    cfg: &RunConfig,
+) -> Result<ExperimentalUdpSummary> {
     let target_url = pick_stun_target(turn).context("no stun/turn url in /__turn")?;
     let (host, port) = parse_host_port(&target_url)?;
 
@@ -89,33 +92,28 @@ pub async fn run_udp_like_loss_probe(turn: &TurnInfo, cfg: &RunConfig) -> Result
 
     // Bind UDP socket to interface or source IP if specified
     let sock = if cfg.interface.is_some() || cfg.source_ip.is_some() {
-        let bind_addr = network_bind::resolve_bind_address(
-            cfg.interface.as_ref(),
-            cfg.source_ip.as_ref(),
-        )?;
-        
+        let bind_addr =
+            network_bind::resolve_bind_address(cfg.interface.as_ref(), cfg.source_ip.as_ref())?;
+
         if let Some(addr) = bind_addr {
             // Create socket using socket2 for binding
             let domain = socket2::Domain::for_address(addr);
-            let socket = socket2::Socket::new(
-                domain,
-                socket2::Type::DGRAM,
-                Some(socket2::Protocol::UDP),
-            )?;
-            
+            let socket =
+                socket2::Socket::new(domain, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
+
             // Bind to the specified address
             socket.bind(&socket2::SockAddr::from(addr))?;
-            
+
             // Bind to interface if specified (Linux only)
             #[cfg(target_os = "linux")]
             if let Some(ref iface) = cfg.interface {
                 use std::ffi::CString;
                 use std::os::unix::io::AsRawFd;
-                
+
                 let ifname = CString::new(iface.as_str()).map_err(|_| {
                     std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid interface name")
                 })?;
-                
+
                 unsafe {
                     if libc::setsockopt(
                         socket.as_raw_fd(),
@@ -133,7 +131,7 @@ pub async fn run_udp_like_loss_probe(turn: &TurnInfo, cfg: &RunConfig) -> Result
                     }
                 }
             }
-            
+
             // Convert to tokio UdpSocket
             let std_socket: std::net::UdpSocket = socket.into();
             std_socket.set_nonblocking(true)?;
@@ -145,7 +143,7 @@ pub async fn run_udp_like_loss_probe(turn: &TurnInfo, cfg: &RunConfig) -> Result
         // Bind ephemeral UDP (default behavior)
         UdpSocket::bind("0.0.0.0:0").await?
     };
-    
+
     sock.connect(addr).await?;
 
     let timeout = Duration::from_millis(600);

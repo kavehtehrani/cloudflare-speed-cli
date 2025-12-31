@@ -16,19 +16,22 @@ pub struct CloudflareClient {
 impl CloudflareClient {
     pub fn new(cfg: &RunConfig) -> Result<Self> {
         let base_url = Url::parse(&cfg.base_url).context("invalid base_url")?;
-        
+
         let mut builder = reqwest::Client::builder()
             .user_agent(cfg.user_agent.clone())
             .timeout(Duration::from_secs(30))
             .tcp_keepalive(Duration::from_secs(15));
-        
+
         // Configure binding to interface or source IP if specified
         if let Some(ref iface) = cfg.interface {
             use crate::engine::network_bind;
             match network_bind::get_interface_ip(iface) {
                 Ok(ip) => {
                     builder = builder.local_address(ip);
-                    eprintln!("Binding HTTP connections to interface {} (IP: {})", iface, ip);
+                    eprintln!(
+                        "Binding HTTP connections to interface {} (IP: {})",
+                        iface, ip
+                    );
                 }
                 Err(e) => {
                     return Err(anyhow::anyhow!(
@@ -54,14 +57,15 @@ impl CloudflareClient {
                 }
             }
         }
-        
+
         // Load custom certificate if provided
         if let Some(ref cert_path) = cfg.certificate_path {
             // Check file extension
-            let ext = cert_path.extension()
+            let ext = cert_path
+                .extension()
                 .and_then(|e| e.to_str())
                 .map(|e| e.to_lowercase());
-            
+
             let valid_extensions = ["pem", "crt", "cer", "der"];
             if let Some(ref ext) = ext {
                 if !valid_extensions.contains(&ext.as_str()) {
@@ -77,25 +81,32 @@ impl CloudflareClient {
                     valid_extensions.join(", ")
                 ));
             }
-            
-            let cert_data = std::fs::read(cert_path)
-                .with_context(|| format!("failed to read certificate from {}", cert_path.display()))?;
-            
+
+            let cert_data = std::fs::read(cert_path).with_context(|| {
+                format!("failed to read certificate from {}", cert_path.display())
+            })?;
+
             // Parse based on file extension
             let cert = match ext.as_deref() {
-                Some("der") => reqwest::Certificate::from_der(&cert_data)
-                    .with_context(|| format!("failed to parse DER certificate from {}", cert_path.display()))?,
-                _ => reqwest::Certificate::from_pem(&cert_data)
-                    .with_context(|| format!("failed to parse PEM certificate from {}", cert_path.display()))?,
+                Some("der") => reqwest::Certificate::from_der(&cert_data).with_context(|| {
+                    format!(
+                        "failed to parse DER certificate from {}",
+                        cert_path.display()
+                    )
+                })?,
+                _ => reqwest::Certificate::from_pem(&cert_data).with_context(|| {
+                    format!(
+                        "failed to parse PEM certificate from {}",
+                        cert_path.display()
+                    )
+                })?,
             };
-            
+
             builder = builder.add_root_certificate(cert);
         }
-        
-        let http = builder
-            .build()
-            .context("failed to build http client")?;
-        
+
+        let http = builder.build().context("failed to build http client")?;
+
         Ok(Self {
             base_url,
             meas_id: cfg.meas_id.clone(),
@@ -390,4 +401,3 @@ pub fn map_colo_to_server(locations: &serde_json::Value, colo: &str) -> Option<S
         Some(colo.to_string())
     }
 }
-

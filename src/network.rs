@@ -13,7 +13,7 @@ pub struct NetworkInfo {
 
 /// Gather network interface information based on CLI arguments
 pub fn gather_network_info(args: &Cli) -> NetworkInfo {
-    let (interface_name, network_name, is_wireless, interface_mac, link_speed_mbps) = 
+    let (interface_name, network_name, is_wireless, interface_mac, link_speed_mbps) =
         if let Some(ref iface) = args.interface {
             // Use the specified interface
             let is_wireless = check_if_wireless(iface);
@@ -81,7 +81,7 @@ fn get_default_interface() -> Option<String> {
                         Some(rest[..space_pos].to_string())
                     } else {
                         Some(rest.to_string())
-                    }
+                    };
                 }
             }
         }
@@ -158,14 +158,14 @@ fn get_interface_speed(iface: &str) -> Option<u64> {
 /// Enrich RunResult with network information and metadata
 pub fn enrich_result(result: &RunResult, network_info: &NetworkInfo) -> RunResult {
     let mut enriched = result.clone();
-    
+
     // Add network interface information
     enriched.interface_name = network_info.interface_name.clone();
     enriched.network_name = network_info.network_name.clone();
     enriched.is_wireless = network_info.is_wireless;
     enriched.interface_mac = network_info.interface_mac.clone();
     enriched.link_speed_mbps = network_info.link_speed_mbps;
-    
+
     // Extract metadata from result.meta if available
     if let Some(meta) = result.meta.as_ref() {
         // Try multiple possible field names for IP
@@ -175,29 +175,32 @@ pub fn enrich_result(result: &RunResult, network_info: &NetworkInfo) -> RunResul
             .or_else(|| meta.get("clientIP"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        
+
         enriched.colo = meta
             .get("colo")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        
+
         // Extract ASN and organization
         enriched.asn = meta
             .get("asn")
             .and_then(|v| v.as_i64())
             .map(|n| n.to_string())
-            .or_else(|| meta.get("asn").and_then(|v| v.as_str()).map(|s| s.to_string()));
-        
+            .or_else(|| {
+                meta.get("asn")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            });
+
         enriched.as_org = meta
             .get("asOrganization")
             .or_else(|| meta.get("asnOrg"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
     }
-    
+
     // Server should already be set from RunResult.server, but preserve it
     // (no need to override)
-    
+
     enriched
 }
-
