@@ -915,7 +915,8 @@ fn draw_dashboard(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
             .style(Style::default().fg(Color::Green))
             .data(&state.dl_points);
 
-        let dl_metrics = crate::metrics::compute_throughput_metrics(&state.dl_points);
+        let dl_values: Vec<f64> = state.dl_points.iter().map(|(_, y)| *y).collect();
+        let dl_metrics = crate::metrics::compute_metrics(dl_values);
         // Use the computed mean from metrics for the title to match what's shown below
         let dl_avg = dl_metrics
             .map(|(mean, _, _, _)| mean)
@@ -978,7 +979,8 @@ fn draw_dashboard(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
             .style(Style::default().fg(Color::Cyan))
             .data(&state.ul_points);
 
-        let ul_metrics = crate::metrics::compute_throughput_metrics(&state.ul_points);
+        let ul_values: Vec<f64> = state.ul_points.iter().map(|(_, y)| *y).collect();
+        let ul_metrics = crate::metrics::compute_metrics(ul_values);
         // Use the computed mean from metrics for the title to match what's shown below
         let ul_avg = ul_metrics
             .map(|(mean, _, _, _)| mean)
@@ -1041,7 +1043,7 @@ fn draw_dashboard(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
     // Idle latency
     if state.idle_latency_samples.len() >= 2 {
         // Use the same median calculation as the metrics below
-        let median = crate::metrics::compute_latency_metrics(&state.idle_latency_samples)
+        let median = crate::metrics::compute_metrics(state.idle_latency_samples.to_vec())
             .map(|(_, med, _, _)| med)
             .unwrap_or(f64::NAN);
         let title = Line::from(format!("Idle Latency ({:.0}ms)", median));
@@ -1061,7 +1063,7 @@ fn draw_dashboard(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
     // Download latency
     if state.loaded_dl_latency_samples.len() >= 2 {
         // Use the same median calculation as the metrics below
-        let median = crate::metrics::compute_latency_metrics(&state.loaded_dl_latency_samples)
+        let median = crate::metrics::compute_metrics(state.loaded_dl_latency_samples.to_vec())
             .map(|(_, med, _, _)| med)
             .unwrap_or(f64::NAN);
         let title = Line::from(vec![
@@ -1091,7 +1093,7 @@ fn draw_dashboard(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
     // Upload latency
     if state.loaded_ul_latency_samples.len() >= 2 {
         // Use the same median calculation as the metrics below
-        let median = crate::metrics::compute_latency_metrics(&state.loaded_ul_latency_samples)
+        let median = crate::metrics::compute_metrics(state.loaded_ul_latency_samples.to_vec())
             .map(|(_, med, _, _)| med)
             .unwrap_or(f64::NAN);
         let title = Line::from(vec![

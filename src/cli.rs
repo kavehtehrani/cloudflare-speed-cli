@@ -273,17 +273,17 @@ async fn run_text(args: Cli) -> Result<()> {
     }
 
     // Compute and display throughput metrics (mean, median, p25, p75)
-    let (dl_mean, dl_median, dl_p25, dl_p75) =
-        crate::metrics::compute_throughput_metrics(&dl_points)
-            .context("insufficient download throughput data to compute metrics")?;
+    let dl_values: Vec<f64> = dl_points.iter().map(|(_, y)| *y).collect();
+    let (dl_mean, dl_median, dl_p25, dl_p75) = crate::metrics::compute_metrics(dl_values)
+        .context("insufficient download throughput data to compute metrics")?;
     println!(
         "Download: avg {:.2} med {:.2} p25 {:.2} p75 {:.2}",
         dl_mean, dl_median, dl_p25, dl_p75
     );
 
-    let (ul_mean, ul_median, ul_p25, ul_p75) =
-        crate::metrics::compute_throughput_metrics(&ul_points)
-            .context("insufficient upload throughput data to compute metrics")?;
+    let ul_values: Vec<f64> = ul_points.iter().map(|(_, y)| *y).collect();
+    let (ul_mean, ul_median, ul_p25, ul_p75) = crate::metrics::compute_metrics(ul_values)
+        .context("insufficient upload throughput data to compute metrics")?;
     println!(
         "Upload:   avg {:.2} med {:.2} p25 {:.2} p75 {:.2}",
         ul_mean, ul_median, ul_p25, ul_p75
@@ -291,7 +291,7 @@ async fn run_text(args: Cli) -> Result<()> {
 
     // Compute and display latency metrics (mean, median, p25, p75)
     let (idle_mean, idle_median, idle_p25, idle_p75) =
-        crate::metrics::compute_latency_metrics(&idle_latency_samples)
+        crate::metrics::compute_metrics(idle_latency_samples.to_vec())
             .context("insufficient idle latency data to compute metrics")?;
     println!(
         "Idle latency: avg {:.1} med {:.1} p25 {:.1} p75 {:.1} ms (loss {:.1}%, jitter {:.1} ms)",
@@ -304,7 +304,7 @@ async fn run_text(args: Cli) -> Result<()> {
     );
 
     let (dl_lat_mean, dl_lat_median, dl_lat_p25, dl_lat_p75) =
-        crate::metrics::compute_latency_metrics(&loaded_dl_latency_samples)
+        crate::metrics::compute_metrics(loaded_dl_latency_samples.to_vec())
             .context("insufficient loaded download latency data to compute metrics")?;
     println!(
         "Loaded latency (download): avg {:.1} med {:.1} p25 {:.1} p75 {:.1} ms (loss {:.1}%, jitter {:.1} ms)",
@@ -317,7 +317,7 @@ async fn run_text(args: Cli) -> Result<()> {
     );
 
     let (ul_lat_mean, ul_lat_median, ul_lat_p25, ul_lat_p75) =
-        crate::metrics::compute_latency_metrics(&loaded_ul_latency_samples)
+        crate::metrics::compute_metrics(loaded_ul_latency_samples.to_vec())
             .context("insufficient loaded upload latency data to compute metrics")?;
     println!(
         "Loaded latency (upload): avg {:.1} med {:.1} p25 {:.1} p75 {:.1} ms (loss {:.1}%, jitter {:.1} ms)",

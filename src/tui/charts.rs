@@ -99,7 +99,7 @@ pub fn render_box_plot_with_metrics_inside(
         f.render_widget(canvas, chart_metrics[0]);
 
         // Render metrics in bottom area
-        if let Some(metrics) = crate::metrics::compute_latency_metrics(samples) {
+        if let Some(metrics) = crate::metrics::compute_metrics(samples.to_vec()) {
             let metrics_text = render_metrics_text(metrics, color);
             f.render_widget(
                 Paragraph::new(metrics_text).alignment(Alignment::Center),
