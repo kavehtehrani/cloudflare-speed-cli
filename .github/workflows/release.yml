@@ -212,42 +212,39 @@ jobs:
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
 
-  # Build .deb packages for Linux targets
-  build-deb-packages:
-    needs:
-      - plan
-    # Only run if we're "publishing", and only if plan didn't fail
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' }}
-    runs-on: "ubuntu-22.04"
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          submodules: recursive
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - name: Install musl tools
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: Install cargo-deb
-        uses: baptiste0928/cargo-install@v3
-        with:
-          crate: cargo-deb
-      - name: Build .deb package
-        run: cargo deb --target ${{ matrix.target }}
-      - name: "Upload .deb artifacts"
-        uses: actions/upload-artifact@v4
-        with:
-          name: artifacts-deb-${{ matrix.target }}
-          path: target/${{ matrix.target }}/debian/*.deb
+build-deb-package:
+  needs:
+    - plan
+  if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' }}
+  runs-on: ubuntu-22.04
+
+  permissions:
+    contents: write
+
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+        submodules: recursive
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install cargo-deb
+      uses: baptiste0928/cargo-install@v3
+      with:
+        crate: cargo-deb
+
+    - name: Build release binary
+      run: cargo build --release
+
+    - name: Build .deb package
+      run: cargo deb
+
+    - name: Upload .deb to GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: target/debian/*.deb
 
   # Determines if we should publish/announce
   host:
