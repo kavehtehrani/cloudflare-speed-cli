@@ -60,8 +60,6 @@ impl TestEngine {
             });
 
         // Control listener.
-        // This task will exit naturally when the sender is dropped (which happens in cli.rs)
-        // The receiver will return None and the loop will exit cleanly
         let paused2 = paused.clone();
         let cancel2 = cancel.clone();
         let control_handle = tokio::spawn(async move {

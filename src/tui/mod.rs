@@ -371,8 +371,17 @@ pub async fn run(args: Cli) -> Result<()> {
                             if state.tab == 0 {
                                 if let Some(r) = state.last_result.as_ref() {
                                     match save_result_json(r, &state) {
-                                        Ok(p) => {
-                                            state.info = format!("Saved JSON: {}", p.display());
+                                        Ok(path) => {
+                                            // Update last_result to the enriched version that was saved
+                                            // This ensures the path computation matches
+                                            let enriched = enrich_result_with_network_info(r, &state);
+                                            state.last_result = Some(enriched);
+                                            // Verify file exists before showing path
+                                            if path.exists() {
+                                                state.info = format!("Saved: {}", path.display());
+                                            } else {
+                                                state.info = format!("Saved (verifying): {}", path.display());
+                                            }
                                         }
                                         Err(e) => {
                                             state.info = format!("Save failed: {e:#}");
@@ -626,7 +635,7 @@ pub async fn run(args: Cli) -> Result<()> {
                                 Err(e) => state.info = format!("Run join failed: {e}"),
                             }
                             }
-                            run_ctx = None; // Clear run_ctx after test completes
+                            run_ctx = None;
                         }
                     }
                     Some(ev) => apply_event(&mut state, ev),
@@ -1113,10 +1122,6 @@ fn draw_dashboard(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
         .split(main[2]);
 
     // Network Information panel (left)
-    let saved_path = state
-        .last_result
-        .as_ref()
-        .and_then(|r| crate::storage::get_run_path(r).ok());
 
     // Determine IP version
     let ip_version = state
@@ -1256,39 +1261,81 @@ fn draw_dashboard(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
     f.render_widget(shortcuts, info_row[1]);
 
     // Status panel (full width at bottom)
-    let status_lines = vec![
-        Line::from(vec![
-            Span::styled("Phase: ", Style::default().fg(Color::Gray)),
-            Span::raw(format!("{:?}", state.phase)),
-            Span::raw("   "),
-            Span::styled("Paused: ", Style::default().fg(Color::Gray)),
-            Span::raw(format!("{}", state.paused)),
-            Span::raw("   "),
-            Span::styled("Auto-save: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                if state.auto_save { "ON" } else { "OFF" },
-                if state.auto_save {
-                    Style::default().fg(Color::Green)
+    let mut status_lines = vec![Line::from(vec![
+        Span::styled("Phase: ", Style::default().fg(Color::Gray)),
+        Span::raw(format!("{:?}", state.phase)),
+        Span::raw("   "),
+        Span::styled("Paused: ", Style::default().fg(Color::Gray)),
+        Span::raw(format!("{}", state.paused)),
+        Span::raw("   "),
+        Span::styled("Auto-save: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            if state.auto_save { "ON" } else { "OFF" },
+            if state.auto_save {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::Red)
+            },
+        ),
+    ])];
+
+    // Info line - split into two lines if it contains a saved path, with wrapping
+    if state.info.starts_with("Saved:") || state.info.starts_with("Saved (verifying):") {
+        // Split into label and path
+        if let Some(colon_pos) = state.info.find(':') {
+            let (label, path) = state.info.split_at(colon_pos + 1);
+            let label_text = label.trim();
+            let path_str = path.trim();
+
+            // Wrap the path to fit within available width
+            // Account for borders (2 chars on each side)
+            let status_area_width = main[3].width.saturating_sub(4);
+            let label_width = label_text.chars().count() as u16;
+            let path_chars: Vec<char> = path_str.chars().collect();
+            let mut remaining = path_chars.as_slice();
+            let mut is_first_path_line = true;
+
+            while !remaining.is_empty() {
+                // Calculate how many chars fit on this line
+                let line_width = if is_first_path_line {
+                    // First path line - account for label width
+                    status_area_width.saturating_sub(label_width).max(1)
                 } else {
-                    Style::default().fg(Color::Red)
-                },
-            ),
-        ]),
-        Line::from(vec![
+                    // Subsequent lines - indent by 2 spaces
+                    status_area_width.saturating_sub(2).max(1)
+                };
+
+                let chars_to_take = (remaining.len() as u16).min(line_width) as usize;
+                let (line_chars, rest) = remaining.split_at(chars_to_take);
+                let line_text: String = line_chars.iter().collect();
+
+                if is_first_path_line {
+                    // First line - include label and first part of path
+                    status_lines.push(Line::from(vec![
+                        Span::styled(label_text, Style::default().fg(Color::Gray)),
+                        Span::raw(" "),
+                        Span::raw(line_text),
+                    ]));
+                    is_first_path_line = false;
+                } else {
+                    // Subsequent lines - indent
+                    status_lines.push(Line::from(vec![Span::raw("  "), Span::raw(line_text)]));
+                }
+
+                remaining = rest;
+            }
+        } else {
+            status_lines.push(Line::from(vec![
+                Span::styled("Info: ", Style::default().fg(Color::Gray)),
+                Span::raw(&state.info),
+            ]));
+        }
+    } else {
+        status_lines.push(Line::from(vec![
             Span::styled("Info: ", Style::default().fg(Color::Gray)),
             Span::raw(&state.info),
-        ]),
-        Line::from(vec![
-            Span::styled("Saved JSON: ", Style::default().fg(Color::Gray)),
-            Span::raw(
-                saved_path
-                    .as_ref()
-                    .and_then(|p| p.file_name())
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("none"),
-            ),
-        ]),
-    ];
+        ]));
+    }
 
     let status =
         Paragraph::new(status_lines).block(Block::default().borders(Borders::ALL).title("Status"));
@@ -1718,6 +1765,78 @@ fn draw_history(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
         Span::styled("c", Style::default().fg(Color::Magenta)),
         Span::raw(": export CSV"),
     ]));
+
+    // Show info message if it's an export message (when on history tab)
+    if state.tab == 1
+        && (state.info.starts_with("Exported")
+            || state.info.starts_with("JSON export")
+            || state.info.starts_with("CSV export")
+            || state.info.starts_with("Refreshed")
+            || state.info == "Deleted")
+    {
+        // Wrap long export messages similar to dashboard
+        if state.info.starts_with("Exported JSON:") || state.info.starts_with("Exported CSV:") {
+            // Split into label and path
+            if let Some(colon_pos) = state.info.find(':') {
+                let (label, path_part) = state.info.split_at(colon_pos + 1);
+                let label_trimmed = label.trim();
+                let path_str = path_part.trim();
+
+                // Wrap the path to fit within available width
+                // Account for borders (2 chars on each side)
+                let history_area_width = area.width.saturating_sub(4);
+                let label_with_prefix = format!("Info: {}", label_trimmed);
+                let label_width = label_with_prefix.chars().count() as u16;
+                let path_chars: Vec<char> = path_str.chars().collect();
+                let mut remaining = path_chars.as_slice();
+                let mut is_first_path_line = true;
+
+                while !remaining.is_empty() {
+                    // Calculate how many chars fit on this line
+                    let line_width = if is_first_path_line {
+                        // First path line - account for label width
+                        history_area_width.saturating_sub(label_width).max(1)
+                    } else {
+                        // Subsequent lines - indent by 2 spaces
+                        history_area_width.saturating_sub(2).max(1)
+                    };
+
+                    let chars_to_take = (remaining.len() as u16).min(line_width) as usize;
+                    let (line_chars, rest) = remaining.split_at(chars_to_take);
+                    let line_text: String = line_chars.iter().collect();
+
+                    if is_first_path_line {
+                        // First line - include label and first part of path
+                        lines.push(Line::from(vec![
+                            Span::styled("Info: ", Style::default().fg(Color::Gray)),
+                            Span::styled(label_trimmed, Style::default().fg(Color::Gray)),
+                            Span::raw(" "),
+                            Span::raw(line_text),
+                        ]));
+                        is_first_path_line = false;
+                    } else {
+                        // Subsequent lines - indent
+                        lines.push(Line::from(vec![Span::raw("  "), Span::raw(line_text)]));
+                    }
+
+                    remaining = rest;
+                }
+            } else {
+                // Fallback if no colon found
+                lines.push(Line::from(vec![
+                    Span::styled("Info: ", Style::default().fg(Color::Gray)),
+                    Span::raw(&state.info),
+                ]));
+            }
+        } else {
+            // For other messages (errors, refresh, delete), just show normally
+            lines.push(Line::from(vec![
+                Span::styled("Info: ", Style::default().fg(Color::Gray)),
+                Span::raw(&state.info),
+            ]));
+        }
+    }
+
     lines.push(Line::from(""));
 
     // Apply scroll offset and take only visible items
