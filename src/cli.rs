@@ -25,6 +25,10 @@ pub struct Cli {
     #[arg(long)]
     pub text: bool,
 
+    /// Run silently: suppress all output except errors (for cron usage)
+    #[arg(long)]
+    pub silent: bool,
+
     /// Download phase duration
     #[arg(long, default_value = "10s")]
     pub download_duration: humantime::Duration,
@@ -95,6 +99,18 @@ pub struct Cli {
 }
 
 pub async fn run(args: Cli) -> Result<()> {
+    // Validate that --silent can only be used with --json
+    if args.silent && !args.json {
+        return Err(anyhow::anyhow!(
+            "--silent can only be used with --json. Use --silent --json together."
+        ));
+    }
+
+    // Silent mode takes precedence over other output modes
+    if args.silent {
+        return run_test_engine(args, true).await;
+    }
+
     if !args.json && !args.text {
         #[cfg(feature = "tui")]
         {
@@ -108,7 +124,7 @@ pub async fn run(args: Cli) -> Result<()> {
     }
 
     if args.json {
-        return run_json(args).await;
+        return run_test_engine(args, false).await;
     }
 
     run_text(args).await
@@ -143,29 +159,63 @@ pub fn build_config(args: &Cli) -> RunConfig {
     }
 }
 
-async fn run_json(args: Cli) -> Result<()> {
+/// Common function to run the test engine and process results.
+/// `silent` controls whether to consume events and suppress output.
+async fn run_test_engine(args: Cli, silent: bool) -> Result<()> {
     let cfg = build_config(&args);
-    let (evt_tx, _) = mpsc::channel::<TestEvent>(1024);
-    let (_, ctrl_rx) = mpsc::channel::<EngineControl>(16);
-
-    let engine = TestEngine::new(cfg);
-    let result = engine
-        .run(evt_tx, ctrl_rx)
-        .await
-        .context("speed test failed")?;
-
-    // Gather network information and enrich result
     let network_info = crate::network::gather_network_info(&args);
-    let enriched = crate::network::enrich_result(&result, &network_info);
+    let enriched = if silent {
+        // In silent mode, spawn task and consume events
+        let (evt_tx, mut evt_rx) = mpsc::channel::<TestEvent>(2048);
+        let (_, ctrl_rx) = mpsc::channel::<EngineControl>(16);
 
+        let engine = TestEngine::new(cfg);
+        let handle = tokio::spawn(async move { engine.run(evt_tx, ctrl_rx).await });
+
+        // Consume events silently (no output)
+        while let Some(_ev) = evt_rx.recv().await {
+            // All events are silently consumed - no output
+        }
+
+        let result = handle
+            .await
+            .context("test engine task failed")?
+            .context("speed test failed")?;
+
+        crate::network::enrich_result(&result, &network_info)
+    } else {
+        // In JSON mode, directly await the engine (no need to consume events)
+        let (evt_tx, _) = mpsc::channel::<TestEvent>(1024);
+        let (_, ctrl_rx) = mpsc::channel::<EngineControl>(16);
+
+        let engine = TestEngine::new(cfg);
+        let result = engine
+            .run(evt_tx, ctrl_rx)
+            .await
+            .context("speed test failed")?;
+
+        crate::network::enrich_result(&result, &network_info)
+    };
+
+    // Handle exports (errors will propagate)
     handle_exports(&args, &enriched)?;
 
-    println!("{}", serde_json::to_string_pretty(&enriched)?);
+    if !silent {
+        // Print JSON output in non-silent mode
+        println!("{}", serde_json::to_string_pretty(&enriched)?);
+    }
+
+    // Save results if auto_save is enabled
     if args.auto_save {
-        if let Ok(p) = crate::storage::save_run(&enriched) {
-            eprintln!("Saved: {}", p.display());
+        if silent {
+            crate::storage::save_run(&enriched).context("failed to save run results")?;
+        } else {
+            if let Ok(p) = crate::storage::save_run(&enriched) {
+                eprintln!("Saved: {}", p.display());
+            }
         }
     }
+
     Ok(())
 }
 
