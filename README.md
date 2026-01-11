@@ -35,6 +35,14 @@ For the lazy:
 curl -fsSL https://raw.githubusercontent.com/kavehtehrani/cloudflare-speed-cli/main/install.sh | sh
 ```
 
+### Arch Linux
+
+The package can be installed from the [official repositories](https://archlinux.org/packages/extra/x86_64/cloudflare-speed-cli/):
+
+```bash
+pacman -S cloudflare-speed-cli
+```
+
 ### Binaries
 
 Download the static binary for your system from the
