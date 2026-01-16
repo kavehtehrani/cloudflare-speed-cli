@@ -5,7 +5,7 @@ mod throughput;
 mod turn_udp;
 
 use crate::model::{Phase, RunConfig, RunResult, TestEvent};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -34,7 +34,12 @@ impl TestEngine {
         event_tx: mpsc::Sender<TestEvent>,
         mut control_rx: mpsc::Receiver<EngineControl>,
     ) -> Result<RunResult> {
-        let client = cloudflare::CloudflareClient::new(&self.cfg)?;
+        let client = tokio::task::spawn_blocking({
+            let cfg = self.cfg.clone();
+            move || cloudflare::CloudflareClient::new(&cfg)
+        })
+        .await
+        .context("CloudflareClient::new task panicked")??;
 
         let paused = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));

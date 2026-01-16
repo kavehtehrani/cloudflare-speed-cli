@@ -163,7 +163,12 @@ pub fn build_config(args: &Cli) -> RunConfig {
 /// `silent` controls whether to consume events and suppress output.
 async fn run_test_engine(args: Cli, silent: bool) -> Result<()> {
     let cfg = build_config(&args);
-    let network_info = crate::network::gather_network_info(&args);
+    let network_info = tokio::task::spawn_blocking({
+        let args = args.clone();
+        move || crate::network::gather_network_info(&args)
+    })
+    .await
+    .context("gather_network_info task panicked")?;
     let enriched = if silent {
         // In silent mode, spawn task and consume events
         let (evt_tx, mut evt_rx) = mpsc::channel::<TestEvent>(2048);
@@ -198,7 +203,7 @@ async fn run_test_engine(args: Cli, silent: bool) -> Result<()> {
     };
 
     // Handle exports (errors will propagate)
-    handle_exports(&args, &enriched)?;
+    handle_exports(&args, &enriched).await?;
 
     if !silent {
         // Print JSON output in non-silent mode
@@ -208,9 +213,11 @@ async fn run_test_engine(args: Cli, silent: bool) -> Result<()> {
     // Save results if auto_save is enabled
     if args.auto_save {
         if silent {
-            crate::storage::save_run(&enriched).context("failed to save run results")?;
+            crate::storage::save_run(&enriched)
+                .await
+                .context("failed to save run results")?;
         } else {
-            if let Ok(p) = crate::storage::save_run(&enriched) {
+            if let Ok(p) = crate::storage::save_run(&enriched).await {
                 eprintln!("Saved: {}", p.display());
             }
         }
@@ -302,10 +309,15 @@ async fn run_text(args: Cli) -> Result<()> {
     let result = handle.await??;
 
     // Gather network information and enrich result
-    let network_info = crate::network::gather_network_info(&args);
+    let network_info = tokio::task::spawn_blocking({
+        let args = args.clone();
+        move || crate::network::gather_network_info(&args)
+    })
+    .await
+    .context("gather_network_info task panicked")?;
     let enriched = crate::network::enrich_result(&result, &network_info);
 
-    handle_exports(&args, &enriched)?;
+    handle_exports(&args, &enriched).await?;
     if let Some(meta) = enriched.meta.as_ref() {
         let extracted = crate::network::extract_metadata(meta);
         let ip = extracted.ip.as_deref().unwrap_or("-");
@@ -388,7 +400,7 @@ async fn run_text(args: Cli) -> Result<()> {
         );
     }
     if args.auto_save {
-        if let Ok(p) = crate::storage::save_run(&enriched) {
+        if let Ok(p) = crate::storage::save_run(&enriched).await {
             eprintln!("Saved: {}", p.display());
         }
     }
@@ -396,12 +408,12 @@ async fn run_text(args: Cli) -> Result<()> {
 }
 
 /// Handle export operations (JSON and CSV) for both text and JSON modes.
-fn handle_exports(args: &Cli, result: &crate::model::RunResult) -> Result<()> {
+async fn handle_exports(args: &Cli, result: &crate::model::RunResult) -> Result<()> {
     if let Some(p) = args.export_json.as_deref() {
-        crate::storage::export_json(p, result)?;
+        crate::storage::export_json(p, result).await?;
     }
     if let Some(p) = args.export_csv.as_deref() {
-        crate::storage::export_csv(p, result)?;
+        crate::storage::export_csv(p, result).await?;
     }
     Ok(())
 }

@@ -15,16 +15,20 @@ fn runs_dir() -> PathBuf {
 }
 
 /// Ensure the necessary directories exist for storing data.
-pub fn ensure_dirs() -> Result<()> {
-    std::fs::create_dir_all(runs_dir()).context("create runs dir")?;
+pub async fn ensure_dirs() -> Result<()> {
+    tokio::fs::create_dir_all(runs_dir())
+        .await
+        .context("create runs dir")?;
     Ok(())
 }
 
-pub fn save_run(result: &RunResult) -> Result<PathBuf> {
-    ensure_dirs()?;
+pub async fn save_run(result: &RunResult) -> Result<PathBuf> {
+    ensure_dirs().await?;
     let path = get_run_path(result)?;
     let data = serde_json::to_vec_pretty(result)?;
-    std::fs::write(&path, data).context("write run json")?;
+    tokio::fs::write(&path, data)
+        .await
+        .context("write run json")?;
     Ok(path)
 }
 
@@ -34,28 +38,36 @@ pub fn get_run_path(result: &RunResult) -> Result<PathBuf> {
     Ok(runs_dir().join(format!("run-{safe_ts}-{}.json", result.meas_id)))
 }
 
-pub fn delete_run(result: &RunResult) -> Result<()> {
+pub async fn delete_run(result: &RunResult) -> Result<()> {
     let path = get_run_path(result)?;
-    if path.exists() {
-        std::fs::remove_file(&path).context("delete run file")?;
+    if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        tokio::fs::remove_file(&path)
+            .await
+            .context("delete run file")?;
     }
     Ok(())
 }
 
-pub fn export_json(path: &Path, result: &RunResult) -> Result<()> {
+pub async fn export_json(path: &Path, result: &RunResult) -> Result<()> {
     // Create parent directories if they don't exist
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).context("create export directory")?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .context("create export directory")?;
     }
     let data = serde_json::to_vec_pretty(result)?;
-    std::fs::write(path, data).context("write export json")?;
+    tokio::fs::write(path, data)
+        .await
+        .context("write export json")?;
     Ok(())
 }
 
-pub fn export_csv(path: &Path, result: &RunResult) -> Result<()> {
+pub async fn export_csv(path: &Path, result: &RunResult) -> Result<()> {
     // Create parent directories if they don't exist
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).context("create export directory")?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .context("create export directory")?;
     }
     let mut out = String::new();
     out.push_str("timestamp_utc,base_url,meas_id,comments,server,download_mbps,upload_mbps,idle_mean_ms,idle_median_ms,idle_p25_ms,idle_p75_ms,idle_loss,dl_loaded_mean_ms,dl_loaded_median_ms,dl_loaded_p25_ms,dl_loaded_p75_ms,dl_loaded_loss,ul_loaded_mean_ms,ul_loaded_median_ms,ul_loaded_p25_ms,ul_loaded_p75_ms,ul_loaded_loss,ip,colo,asn,as_org,interface_name,network_name,is_wireless,interface_mac,link_speed_mbps\n");
@@ -93,7 +105,9 @@ pub fn export_csv(path: &Path, result: &RunResult) -> Result<()> {
         csv_escape(result.interface_mac.as_deref().unwrap_or("")),
         result.link_speed_mbps.map(|s| s.to_string()).unwrap_or_else(|| "".to_string()),
     ));
-    std::fs::write(path, out).context("write export csv")?;
+    tokio::fs::write(path, out)
+        .await
+        .context("write export csv")?;
     Ok(())
 }
 
@@ -106,17 +120,17 @@ fn csv_escape(s: &str) -> String {
     }
 }
 
-pub fn load_recent(limit: usize) -> Result<Vec<RunResult>> {
-    ensure_dirs()?;
+pub async fn load_recent(limit: usize) -> Result<Vec<RunResult>> {
+    ensure_dirs().await?;
     let dir = runs_dir();
     let mut entries: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
-    for e in std::fs::read_dir(&dir).context("read runs dir")? {
-        let e = e?;
+    let mut dir_iter = tokio::fs::read_dir(&dir).await.context("read runs dir")?;
+    while let Some(e) = dir_iter.next_entry().await? {
         let p = e.path();
         if p.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let m = e.metadata()?;
+        let m = e.metadata().await?;
         let mt = m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
         entries.push((mt, p));
     }
@@ -125,7 +139,9 @@ pub fn load_recent(limit: usize) -> Result<Vec<RunResult>> {
 
     let mut out = Vec::new();
     for (_, p) in entries.into_iter().take(limit) {
-        let data = std::fs::read(&p).with_context(|| format!("read {}", p.display()))?;
+        let data = tokio::fs::read(&p)
+            .await
+            .with_context(|| format!("read {}", p.display()))?;
         let r: RunResult =
             serde_json::from_slice(&data).with_context(|| format!("parse {}", p.display()))?;
         out.push(r);

@@ -288,11 +288,18 @@ pub async fn run(args: Cli) -> Result<()> {
         ..Default::default()
     };
     state.initial_history_load_size = initial_load;
-    state.history = crate::storage::load_recent(initial_load).unwrap_or_default();
+    state.history = crate::storage::load_recent(initial_load)
+        .await
+        .unwrap_or_default();
     state.history_loaded_count = state.history.len();
 
     // Gather network interface information using shared module
-    let network_info = crate::network::gather_network_info(&args);
+    let network_info = tokio::task::spawn_blocking({
+        let args = args.clone();
+        move || crate::network::gather_network_info(&args)
+    })
+    .await
+    .context("gather_network_info task panicked")?;
     state.interface_name = network_info.interface_name.clone();
     state.network_name = network_info.network_name.clone();
     state.is_wireless = network_info.is_wireless;
@@ -343,7 +350,7 @@ pub async fn run(args: Cli) -> Result<()> {
                             // Refresh history (only when on history tab)
                             if state.tab == 1 {
                                 let reload_size = state.initial_history_load_size.max(state.history_loaded_count);
-                                match crate::storage::load_recent(reload_size) {
+                                match crate::storage::load_recent(reload_size).await {
                                     Ok(new_history) => {
                                         let old_count = state.history.len();
                                         state.history = new_history;
@@ -422,7 +429,7 @@ pub async fn run(args: Cli) -> Result<()> {
                             // Only save on dashboard (auto-save location)
                             if state.tab == 0 {
                                 if let Some(r) = state.last_result.clone() {
-                                    save_and_show_path(&r, &mut state);
+                                    save_and_show_path(&r, &mut state).await;
                                 } else {
                                     state.info = "No completed run to save yet.".into();
                                 }
@@ -433,7 +440,7 @@ pub async fn run(args: Cli) -> Result<()> {
                             if state.tab == 1 && !state.history.is_empty() {
                                 if state.history_selected < state.history.len() {
                                     let r = &state.history[state.history_selected];
-                                    match export_result_json(r, &state) {
+                                    match export_result_json(r, &state).await {
                                         Ok(p) => {
                                             let path_str = p.to_string_lossy().to_string();
                                             state.last_exported_path = Some(path_str.clone());
@@ -450,7 +457,7 @@ pub async fn run(args: Cli) -> Result<()> {
                             if state.tab == 1 && !state.history.is_empty() {
                                 if state.history_selected < state.history.len() {
                                     let r = &state.history[state.history_selected];
-                                    match export_result_csv(r, &state) {
+                                    match export_result_csv(r, &state).await {
                                         Ok(p) => {
                                             let path_str = p.to_string_lossy().to_string();
                                             state.last_exported_path = Some(path_str.clone());
@@ -538,7 +545,9 @@ pub async fn run(args: Cli) -> Result<()> {
                                         // Load more items (another batch of the same size)
                                         let current_count = state.history.len();
                                         let load_more = current_count.max(20); // Load at least as many as we have, or 20
-                                        if let Ok(more_history) = crate::storage::load_recent(load_more) {
+                                        if let Ok(more_history) =
+                                            crate::storage::load_recent(load_more).await
+                                        {
                                             // Only add items we don't already have
                                             let existing_ids: std::collections::HashSet<_> = state.history
                                                 .iter()
@@ -562,7 +571,7 @@ pub async fn run(args: Cli) -> Result<()> {
                                 // history_selected directly maps to history index (newest first)
                                 if state.history_selected < state.history.len() {
                                     let to_delete = state.history[state.history_selected].clone();
-                                    if let Err(e) = crate::storage::delete_run(&to_delete) {
+                                    if let Err(e) = crate::storage::delete_run(&to_delete).await {
                                         state.info = format!("Delete failed: {e:#}");
                                     } else {
                                         state.history.remove(state.history_selected);
@@ -602,7 +611,7 @@ pub async fn run(args: Cli) -> Result<()> {
                             match h.await {
                                 Ok(Ok(r)) => {
                                     if state.auto_save {
-                                        save_and_show_path(&r, &mut state);
+                                        save_and_show_path(&r, &mut state).await;
                                     }
                                     if let Some(meta) = r.meta.as_ref() {
                                         let extracted = crate::network::extract_metadata(meta);
@@ -622,13 +631,15 @@ pub async fn run(args: Cli) -> Result<()> {
                                     // Handle command-line export flags
                                     let mut export_messages = Vec::new();
                                     if let Some(export_path) = args.export_json.as_deref() {
-                                        match crate::storage::export_json(export_path, &enriched) {
+                                        match crate::storage::export_json(export_path, &enriched).await
+                                        {
                                             Ok(_) => export_messages.push(format!("Exported JSON: {}", export_path.display())),
                                             Err(e) => export_messages.push(format!("Export JSON failed: {e:#}")),
                                         }
                                     }
                                     if let Some(export_path) = args.export_csv.as_deref() {
-                                        match crate::storage::export_csv(export_path, &enriched) {
+                                        match crate::storage::export_csv(export_path, &enriched).await
+                                        {
                                             Ok(_) => export_messages.push(format!("Exported CSV: {}", export_path.display())),
                                             Err(e) => export_messages.push(format!("Export CSV failed: {e:#}")),
                                         }
@@ -640,7 +651,9 @@ pub async fn run(args: Cli) -> Result<()> {
                                     // Reload history to include the new test
                                     // Load at least one more than we had before to ensure the new test is included
                                     let reload_size = (state.history_loaded_count + 1).max(state.initial_history_load_size);
-                                    state.history = crate::storage::load_recent(reload_size).unwrap_or_default();
+                                    state.history = crate::storage::load_recent(reload_size)
+                                        .await
+                                        .unwrap_or_default();
                                     state.history_loaded_count = state.history.len();
                                     // Reset selection to show the new test (most recent) if on history tab
                                     if state.tab == 1 {
@@ -1653,22 +1666,17 @@ fn enrich_result_with_network_info(r: &RunResult, state: &UiState) -> RunResult 
     enriched
 }
 
-/// Save JSON to the default auto-save location.
-fn save_result_json(r: &RunResult, state: &UiState) -> Result<std::path::PathBuf> {
-    let enriched = enrich_result_with_network_info(r, state);
-    crate::storage::save_run(&enriched)
-}
-
 /// Save result and update state.info with the saved path message.
-fn save_and_show_path(r: &RunResult, state: &mut UiState) {
-    match save_result_json(r, state) {
+async fn save_and_show_path(r: &RunResult, state: &mut UiState) {
+    let enriched = enrich_result_with_network_info(r, state);
+    match crate::storage::save_run(&enriched).await {
         Ok(path) => {
             // Update last_result to the enriched version that was saved
             // This ensures the path computation matches
-            let enriched = enrich_result_with_network_info(r, state);
             state.last_result = Some(enriched);
             // Verify file exists before showing path
-            if path.exists() {
+            let exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
+            if exists {
                 state.info = format!("Saved: {}", path.display());
             } else {
                 state.info = format!("Saved (verifying): {}", path.display());
@@ -1682,7 +1690,7 @@ fn save_and_show_path(r: &RunResult, state: &mut UiState) {
 
 /// Export JSON to a user-specified file location.
 /// Returns the absolute path of the exported file.
-fn export_result_json(r: &RunResult, state: &UiState) -> Result<std::path::PathBuf> {
+async fn export_result_json(r: &RunResult, state: &UiState) -> Result<std::path::PathBuf> {
     // Generate a default filename based on timestamp
     let default_name = format!(
         "cloudflare-speed-{}-{}.json",
@@ -1691,16 +1699,20 @@ fn export_result_json(r: &RunResult, state: &UiState) -> Result<std::path::PathB
     );
 
     // Get absolute path from current directory
-    let current_dir = std::env::current_dir().context("get current directory")?;
+    let current_dir = tokio::task::spawn_blocking(|| {
+        std::env::current_dir().context("get current directory")
+    })
+    .await
+    .context("get current directory task panicked")??;
     let path = current_dir.join(default_name);
     let enriched = enrich_result_with_network_info(r, state);
-    crate::storage::export_json(&path, &enriched)?;
+    crate::storage::export_json(&path, &enriched).await?;
     Ok(path)
 }
 
 /// Export CSV to a user-specified file location.
 /// Returns the absolute path of the exported file.
-fn export_result_csv(r: &RunResult, state: &UiState) -> Result<std::path::PathBuf> {
+async fn export_result_csv(r: &RunResult, state: &UiState) -> Result<std::path::PathBuf> {
     // Generate a default filename based on timestamp
     let default_name = format!(
         "cloudflare-speed-{}-{}.csv",
@@ -1709,10 +1721,14 @@ fn export_result_csv(r: &RunResult, state: &UiState) -> Result<std::path::PathBu
     );
 
     // Get absolute path from current directory
-    let current_dir = std::env::current_dir().context("get current directory")?;
+    let current_dir = tokio::task::spawn_blocking(|| {
+        std::env::current_dir().context("get current directory")
+    })
+    .await
+    .context("get current directory task panicked")??;
     let path = current_dir.join(default_name);
     let enriched = enrich_result_with_network_info(r, state);
-    crate::storage::export_csv(&path, &enriched)?;
+    crate::storage::export_csv(&path, &enriched).await?;
     Ok(path)
 }
 
