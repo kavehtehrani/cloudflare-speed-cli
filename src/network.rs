@@ -26,13 +26,11 @@ pub fn extract_metadata(meta: &Value) -> ExtractedMetadata {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let asn = meta
-        .get("asn")
-        .and_then(|v| {
-            v.as_i64()
-                .map(|n| n.to_string())
-                .or_else(|| v.as_str().map(|s| s.to_string()))
-        });
+    let asn = meta.get("asn").and_then(|v| {
+        v.as_i64()
+            .map(|n| n.to_string())
+            .or_else(|| v.as_str().map(|s| s.to_string()))
+    });
 
     let as_org = ["asOrganization", "asnOrg"]
         .iter()
@@ -40,10 +38,16 @@ pub fn extract_metadata(meta: &Value) -> ExtractedMetadata {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    ExtractedMetadata { ip, colo, asn, as_org }
+    ExtractedMetadata {
+        ip,
+        colo,
+        asn,
+        as_org,
+    }
 }
 
 /// Network information gathered from the system
+#[derive(Debug, Clone, Default)]
 pub struct NetworkInfo {
     pub interface_name: Option<String>,
     pub network_name: Option<String>,
@@ -81,6 +85,7 @@ pub fn gather_network_info(args: &Cli) -> NetworkInfo {
 }
 
 /// Gather network interface information for the default interface
+#[allow(clippy::type_complexity)]
 fn gather_default_network_info() -> (
     Option<String>,
     Option<String>,
@@ -110,7 +115,7 @@ fn gather_default_network_info() -> (
 fn get_default_interface() -> Option<String> {
     // Try to get interface from default route
     if let Ok(output) = Command::new("ip")
-        .args(&["route", "show", "default"])
+        .args(["route", "show", "default"])
         .output()
     {
         if let Ok(output_str) = String::from_utf8(output.stdout) {
@@ -162,7 +167,7 @@ fn get_wireless_ssid(iface: &str) -> Option<String> {
     }
 
     // Fallback: try iw command
-    if let Ok(output) = Command::new("iw").args(&["dev", iface, "info"]).output() {
+    if let Ok(output) = Command::new("iw").args(["dev", iface, "info"]).output() {
         if let Ok(output_str) = String::from_utf8(output.stdout) {
             for line in output_str.lines() {
                 if line.trim().starts_with("ssid ") {

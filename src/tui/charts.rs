@@ -158,16 +158,28 @@ fn render_metrics_text<'a>(
 }
 
 /// Helper function to render a throughput chart with metrics inside the same bordered box
-pub fn render_chart_with_metrics_inside(
-    f: &mut Frame,
-    area: Rect,
-    datasets: Vec<Dataset>,
-    x_axis: ratatui::widgets::Axis,
-    y_axis: ratatui::widgets::Axis,
-    title: Line,
-    metrics: Option<(f64, f64, f64, f64)>,
-    color: Color,
-) {
+/// Parameters for rendering a chart with embedded metrics.
+pub(crate) struct ChartRenderParams<'a> {
+    pub area: Rect,
+    pub datasets: Vec<Dataset<'a>>,
+    pub x_axis: ratatui::widgets::Axis<'a>,
+    pub y_axis: ratatui::widgets::Axis<'a>,
+    pub title: Line<'a>,
+    pub metrics: Option<(f64, f64, f64, f64)>,
+    pub color: Color,
+}
+
+/// Render a chart with metrics inside a shared bordered area.
+pub(crate) fn render_chart_with_metrics_inside(f: &mut Frame, params: ChartRenderParams<'_>) {
+    let ChartRenderParams {
+        area,
+        datasets,
+        x_axis,
+        y_axis,
+        title,
+        metrics,
+        color,
+    } = params;
     // Get inner area (accounting for borders)
     let inner = if area.width > 2 && area.height > 2 {
         Rect {

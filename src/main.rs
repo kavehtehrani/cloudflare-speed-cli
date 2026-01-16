@@ -3,13 +3,16 @@ mod engine;
 mod metrics;
 mod model;
 mod network;
+mod orchestrator;
 mod stats;
 mod storage;
+mod text_summary;
 #[cfg(feature = "tui")]
 mod tui;
 
 use anyhow::Result;
 use clap::Parser;
+use std::io::Write;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,7 +29,14 @@ async fn main() -> Result<()> {
         }
         Err(e) => {
             if is_silent {
-                println!("{}", e);
+                let msg = e.to_string();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let stderr = std::io::stderr();
+                    let mut err = std::io::LineWriter::new(stderr.lock());
+                    let _ = writeln!(err, "{}", msg);
+                    let _ = err.flush();
+                })
+                .await;
                 std::process::exit(1);
             } else {
                 Err(e)

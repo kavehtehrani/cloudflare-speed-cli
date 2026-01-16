@@ -3,8 +3,44 @@ use crate::model::{RunConfig, TestEvent};
 use anyhow::{Context, Result};
 use clap::Parser;
 use rand::RngCore;
+use std::io::Write;
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// Output line routing for stdout/stderr writer.
+enum OutputLine {
+    Stdout(String),
+    Stderr(String),
+}
+
+/// Spawn a blocking writer for stdout/stderr to avoid blocking async tasks.
+fn spawn_output_writer() -> (
+    mpsc::UnboundedSender<OutputLine>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (tx, mut rx) = mpsc::unbounded_channel::<OutputLine>();
+    let handle = tokio::task::spawn_blocking(move || {
+        let stdout = std::io::stdout();
+        let stderr = std::io::stderr();
+        let mut out = std::io::LineWriter::new(stdout.lock());
+        let mut err = std::io::LineWriter::new(stderr.lock());
+
+        while let Some(line) = rx.blocking_recv() {
+            match line {
+                OutputLine::Stdout(msg) => {
+                    let _ = writeln!(out, "{}", msg);
+                }
+                OutputLine::Stderr(msg) => {
+                    let _ = writeln!(err, "{}", msg);
+                }
+            }
+        }
+
+        let _ = out.flush();
+        let _ = err.flush();
+    });
+    (tx, handle)
+}
 
 #[derive(Debug, Parser, Clone)]
 #[command(
@@ -164,10 +200,16 @@ pub fn build_config(args: &Cli) -> RunConfig {
 async fn run_test_engine(args: Cli, silent: bool) -> Result<()> {
     let cfg = build_config(&args);
     let network_info = crate::network::gather_network_info(&args);
+    let (out_tx, out_handle) = if silent {
+        (None, None)
+    } else {
+        let (tx, handle) = spawn_output_writer();
+        (Some(tx), Some(handle))
+    };
     let enriched = if silent {
         // In silent mode, spawn task and consume events
-        let (evt_tx, mut evt_rx) = mpsc::channel::<TestEvent>(2048);
-        let (_, ctrl_rx) = mpsc::channel::<EngineControl>(16);
+        let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<TestEvent>();
+        let (_, ctrl_rx) = mpsc::unbounded_channel::<EngineControl>();
 
         let engine = TestEngine::new(cfg);
         let handle = tokio::spawn(async move { engine.run(evt_tx, ctrl_rx).await });
@@ -185,8 +227,8 @@ async fn run_test_engine(args: Cli, silent: bool) -> Result<()> {
         crate::network::enrich_result(&result, &network_info)
     } else {
         // In JSON mode, directly await the engine (no need to consume events)
-        let (evt_tx, _) = mpsc::channel::<TestEvent>(1024);
-        let (_, ctrl_rx) = mpsc::channel::<EngineControl>(16);
+        let (evt_tx, _) = mpsc::unbounded_channel::<TestEvent>();
+        let (_, ctrl_rx) = mpsc::unbounded_channel::<EngineControl>();
 
         let engine = TestEngine::new(cfg);
         let result = engine
@@ -200,20 +242,28 @@ async fn run_test_engine(args: Cli, silent: bool) -> Result<()> {
     // Handle exports (errors will propagate)
     handle_exports(&args, &enriched)?;
 
-    if !silent {
+    if let Some(tx) = out_tx.as_ref() {
         // Print JSON output in non-silent mode
-        println!("{}", serde_json::to_string_pretty(&enriched)?);
+        let out = serde_json::to_string_pretty(&enriched)?;
+        let _ = tx.send(OutputLine::Stdout(out));
     }
 
     // Save results if auto_save is enabled
     if args.auto_save {
         if silent {
             crate::storage::save_run(&enriched).context("failed to save run results")?;
-        } else {
+        } else if let Some(tx) = out_tx.as_ref() {
             if let Ok(p) = crate::storage::save_run(&enriched) {
-                eprintln!("Saved: {}", p.display());
+                let _ = tx.send(OutputLine::Stderr(format!("Saved: {}", p.display())));
             }
         }
+    }
+
+    if let Some(tx) = out_tx {
+        drop(tx);
+    }
+    if let Some(handle) = out_handle {
+        let _ = handle.await;
     }
 
     Ok(())
@@ -221,8 +271,9 @@ async fn run_test_engine(args: Cli, silent: bool) -> Result<()> {
 
 async fn run_text(args: Cli) -> Result<()> {
     let cfg = build_config(&args);
-    let (evt_tx, mut evt_rx) = mpsc::channel::<TestEvent>(2048);
-    let (_, ctrl_rx) = mpsc::channel::<EngineControl>(16);
+    let (out_tx, out_handle) = spawn_output_writer();
+    let (evt_tx, mut evt_rx) = mpsc::unbounded_channel::<TestEvent>();
+    let (_, ctrl_rx) = mpsc::unbounded_channel::<EngineControl>();
 
     let engine = TestEngine::new(cfg);
     let handle = tokio::spawn(async move { engine.run(evt_tx, ctrl_rx).await });
@@ -238,7 +289,7 @@ async fn run_text(args: Cli) -> Result<()> {
     while let Some(ev) = evt_rx.recv().await {
         match ev {
             TestEvent::PhaseStarted { phase } => {
-                eprintln!("== {phase:?} ==");
+                let _ = out_tx.send(OutputLine::Stderr(format!("== {phase:?} ==")));
             }
             TestEvent::ThroughputTick {
                 phase,
@@ -251,7 +302,7 @@ async fn run_text(args: Cli) -> Result<()> {
                 ) {
                     let elapsed = run_start.elapsed().as_secs_f64();
                     let mbps = (bps_instant * 8.0) / 1_000_000.0;
-                    eprintln!("{phase:?}: {:.2} Mbps", mbps);
+                    let _ = out_tx.send(OutputLine::Stderr(format!("{phase:?}: {:.2} Mbps", mbps)));
 
                     // Collect throughput points for metrics
                     match phase {
@@ -275,7 +326,10 @@ async fn run_text(args: Cli) -> Result<()> {
                     if let Some(ms) = rtt_ms {
                         match (phase, during) {
                             (crate::model::Phase::IdleLatency, None) => {
-                                eprintln!("Idle latency: {:.1} ms", ms);
+                                let _ = out_tx.send(OutputLine::Stderr(format!(
+                                    "Idle latency: {:.1} ms",
+                                    ms
+                                )));
                                 idle_latency_samples.push(ms);
                             }
                             (
@@ -292,10 +346,13 @@ async fn run_text(args: Cli) -> Result<()> {
                     }
                 }
             }
-            TestEvent::Info { message } => eprintln!("{message}"),
+            TestEvent::Info(info) => {
+                let _ = out_tx.send(OutputLine::Stderr(info.to_message()));
+            }
             TestEvent::MetaInfo { .. } => {
                 // Meta info is handled in TUI, ignore in text mode
             }
+            TestEvent::RunCompleted { .. } => {}
         }
     }
 
@@ -306,92 +363,24 @@ async fn run_text(args: Cli) -> Result<()> {
     let enriched = crate::network::enrich_result(&result, &network_info);
 
     handle_exports(&args, &enriched)?;
-    if let Some(meta) = enriched.meta.as_ref() {
-        let extracted = crate::network::extract_metadata(meta);
-        let ip = extracted.ip.as_deref().unwrap_or("-");
-        let colo = extracted.colo.as_deref().unwrap_or("-");
-        let asn = extracted.asn.as_deref().unwrap_or("-");
-        let org = extracted.as_org.as_deref().unwrap_or("-");
-        println!("IP/Colo/ASN: {ip} / {colo} / {asn} ({org})");
-    }
-    if let Some(server) = enriched.server.as_deref() {
-        println!("Server: {server}");
-    }
-    if let Some(comments) = enriched.comments.as_deref() {
-        if !comments.trim().is_empty() {
-            println!("Comments: {}", comments);
-        }
-    }
-
-    // Compute and display throughput metrics (mean, median, p25, p75)
-    let dl_values: Vec<f64> = dl_points.iter().map(|(_, y)| *y).collect();
-    let (dl_mean, dl_median, dl_p25, dl_p75) = crate::metrics::compute_metrics(&dl_values)
-        .context("insufficient download throughput data to compute metrics")?;
-    println!(
-        "Download: avg {:.2} med {:.2} p25 {:.2} p75 {:.2}",
-        dl_mean, dl_median, dl_p25, dl_p75
-    );
-
-    let ul_values: Vec<f64> = ul_points.iter().map(|(_, y)| *y).collect();
-    let (ul_mean, ul_median, ul_p25, ul_p75) = crate::metrics::compute_metrics(&ul_values)
-        .context("insufficient upload throughput data to compute metrics")?;
-    println!(
-        "Upload:   avg {:.2} med {:.2} p25 {:.2} p75 {:.2}",
-        ul_mean, ul_median, ul_p25, ul_p75
-    );
-
-    // Compute and display latency metrics (mean, median, p25, p75)
-    let (idle_mean, idle_median, idle_p25, idle_p75) =
-        crate::metrics::compute_metrics(&idle_latency_samples)
-            .context("insufficient idle latency data to compute metrics")?;
-    println!(
-        "Idle latency: avg {:.1} med {:.1} p25 {:.1} p75 {:.1} ms (loss {:.1}%, jitter {:.1} ms)",
-        idle_mean,
-        idle_median,
-        idle_p25,
-        idle_p75,
-        enriched.idle_latency.loss * 100.0,
-        enriched.idle_latency.jitter_ms.unwrap_or(f64::NAN)
-    );
-
-    let (dl_lat_mean, dl_lat_median, dl_lat_p25, dl_lat_p75) =
-        crate::metrics::compute_metrics(&loaded_dl_latency_samples)
-            .context("insufficient loaded download latency data to compute metrics")?;
-    println!(
-        "Loaded latency (download): avg {:.1} med {:.1} p25 {:.1} p75 {:.1} ms (loss {:.1}%, jitter {:.1} ms)",
-        dl_lat_mean,
-        dl_lat_median,
-        dl_lat_p25,
-        dl_lat_p75,
-        enriched.loaded_latency_download.loss * 100.0,
-        enriched.loaded_latency_download.jitter_ms.unwrap_or(f64::NAN)
-    );
-
-    let (ul_lat_mean, ul_lat_median, ul_lat_p25, ul_lat_p75) =
-        crate::metrics::compute_metrics(&loaded_ul_latency_samples)
-            .context("insufficient loaded upload latency data to compute metrics")?;
-    println!(
-        "Loaded latency (upload): avg {:.1} med {:.1} p25 {:.1} p75 {:.1} ms (loss {:.1}%, jitter {:.1} ms)",
-        ul_lat_mean,
-        ul_lat_median,
-        ul_lat_p25,
-        ul_lat_p75,
-        enriched.loaded_latency_upload.loss * 100.0,
-        enriched.loaded_latency_upload.jitter_ms.unwrap_or(f64::NAN)
-    );
-    if let Some(ref exp) = enriched.experimental_udp {
-        println!(
-            "Experimental UDP-like loss probe: loss {:.1}% med {} ms (target {:?})",
-            exp.latency.loss * 100.0,
-            exp.latency.median_ms.unwrap_or(f64::NAN),
-            exp.target
-        );
+    let summary = crate::text_summary::build_text_summary(
+        &enriched,
+        &dl_points,
+        &ul_points,
+        &idle_latency_samples,
+        &loaded_dl_latency_samples,
+        &loaded_ul_latency_samples,
+    )?;
+    for line in summary.lines {
+        let _ = out_tx.send(OutputLine::Stdout(line));
     }
     if args.auto_save {
         if let Ok(p) = crate::storage::save_run(&enriched) {
-            eprintln!("Saved: {}", p.display());
+            let _ = out_tx.send(OutputLine::Stderr(format!("Saved: {}", p.display())));
         }
     }
+    drop(out_tx);
+    let _ = out_handle.await;
     Ok(())
 }
 

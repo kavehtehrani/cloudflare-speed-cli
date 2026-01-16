@@ -91,7 +91,10 @@ pub fn export_csv(path: &Path, result: &RunResult) -> Result<()> {
         csv_escape(result.network_name.as_deref().unwrap_or("")),
         result.is_wireless.map(|w| if w { "true" } else { "false" }).unwrap_or(""),
         csv_escape(result.interface_mac.as_deref().unwrap_or("")),
-        result.link_speed_mbps.map(|s| s.to_string()).unwrap_or_else(|| "".to_string()),
+        result
+            .link_speed_mbps
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
     ));
     std::fs::write(path, out).context("write export csv")?;
     Ok(())

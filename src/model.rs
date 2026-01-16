@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,12 +61,43 @@ pub enum TestEvent {
         bytes_total: u64,
         bps_instant: f64,
     },
-    Info {
-        message: String,
-    },
+    Info(InfoEvent),
     MetaInfo {
         meta: serde_json::Value,
     },
+    RunCompleted {
+        // Box to keep TestEvent size small; RunResult is large and would bloat the enum.
+        result: Box<RunResult>,
+    },
+}
+
+/// Structured info events emitted by the engine and consumed by UI/CLI layers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum InfoEvent {
+    // UI/CLI messages generated outside the engine.
+    Message(String),
+    BindInterface { iface: String, ip: IpAddr },
+    BindSourceIp { ip: IpAddr },
+    FetchingTurn,
+}
+
+impl InfoEvent {
+    /// Render a human-readable message for UI/CLI layers.
+    pub fn to_message(&self) -> String {
+        match self {
+            InfoEvent::Message(msg) => msg.clone(),
+            InfoEvent::BindInterface { iface, ip } => {
+                format!(
+                    "Binding HTTP connections to interface {} (IP: {})",
+                    iface, ip
+                )
+            }
+            InfoEvent::BindSourceIp { ip } => {
+                format!("Binding HTTP connections to source IP: {}", ip)
+            }
+            InfoEvent::FetchingTurn => "Fetching TURN info (experimental)".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

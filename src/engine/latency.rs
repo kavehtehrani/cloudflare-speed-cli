@@ -9,17 +9,32 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
-pub async fn run_latency_probes(
-    client: &CloudflareClient,
-    phase: Phase,
-    during: Option<Phase>,
-    total_duration: Duration,
-    interval_ms: u64,
-    timeout_ms: u64,
-    event_tx: &mpsc::Sender<TestEvent>,
-    paused: Arc<AtomicBool>,
-    cancel: Arc<AtomicBool>,
-) -> Result<LatencySummary> {
+/// Parameters for running a latency probe loop.
+pub(crate) struct LatencyProbeParams<'a> {
+    pub client: &'a CloudflareClient,
+    pub phase: Phase,
+    pub during: Option<Phase>,
+    pub total_duration: Duration,
+    pub interval_ms: u64,
+    pub timeout_ms: u64,
+    pub event_tx: &'a mpsc::UnboundedSender<TestEvent>,
+    pub paused: Arc<AtomicBool>,
+    pub cancel: Arc<AtomicBool>,
+}
+
+/// Run latency probes based on the provided parameters.
+pub(crate) async fn run_latency_probes(params: LatencyProbeParams<'_>) -> Result<LatencySummary> {
+    let LatencyProbeParams {
+        client,
+        phase,
+        during,
+        total_duration,
+        interval_ms,
+        timeout_ms,
+        event_tx,
+        paused,
+        cancel,
+    } = params;
     let start = Instant::now();
     let mut sent = 0u64;
     let mut received = 0u64;
@@ -48,31 +63,25 @@ pub async fn run_latency_probes(
                 // Extract meta from first successful response
                 if !meta_sent && phase == Phase::IdleLatency {
                     if let Some(meta) = meta_opt {
-                        event_tx.send(TestEvent::MetaInfo { meta }).await.ok();
+                        let _ = event_tx.send(TestEvent::MetaInfo { meta });
                         meta_sent = true;
                     }
                 }
 
-                event_tx
-                    .send(TestEvent::LatencySample {
-                        phase,
-                        during,
-                        rtt_ms: Some(ms),
-                        ok: true,
-                    })
-                    .await
-                    .ok();
+                let _ = event_tx.send(TestEvent::LatencySample {
+                    phase,
+                    during,
+                    rtt_ms: Some(ms),
+                    ok: true,
+                });
             }
             Err(_) => {
-                event_tx
-                    .send(TestEvent::LatencySample {
-                        phase,
-                        during,
-                        rtt_ms: None,
-                        ok: false,
-                    })
-                    .await
-                    .ok();
+                let _ = event_tx.send(TestEvent::LatencySample {
+                    phase,
+                    during,
+                    rtt_ms: None,
+                    ok: false,
+                });
             }
         }
 

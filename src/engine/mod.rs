@@ -4,7 +4,7 @@ mod network_bind;
 mod throughput;
 mod turn_udp;
 
-use crate::model::{Phase, RunConfig, RunResult, TestEvent};
+use crate::model::{InfoEvent, Phase, RunConfig, RunResult, TestEvent};
 use anyhow::Result;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -31,10 +31,10 @@ impl TestEngine {
 
     pub async fn run(
         self,
-        event_tx: mpsc::Sender<TestEvent>,
-        mut control_rx: mpsc::Receiver<EngineControl>,
+        event_tx: mpsc::UnboundedSender<TestEvent>,
+        mut control_rx: mpsc::UnboundedReceiver<EngineControl>,
     ) -> Result<RunResult> {
-        let client = cloudflare::CloudflareClient::new(&self.cfg)?;
+        let client = cloudflare::CloudflareClient::new(&self.cfg, Some(event_tx.clone()))?;
 
         let paused = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
@@ -75,41 +75,30 @@ impl TestEngine {
             }
         });
 
-        event_tx
-            .send(TestEvent::PhaseStarted {
-                phase: Phase::IdleLatency,
-            })
-            .await
-            .ok();
+        let _ = event_tx.send(TestEvent::PhaseStarted {
+            phase: Phase::IdleLatency,
+        });
 
-        let idle_latency = latency::run_latency_probes(
-            &client,
-            Phase::IdleLatency,
-            None,
-            self.cfg.idle_latency_duration,
-            self.cfg.probe_interval_ms,
-            self.cfg.probe_timeout_ms,
-            &event_tx,
-            paused.clone(),
-            cancel.clone(),
-        )
+        let idle_latency = latency::run_latency_probes(latency::LatencyProbeParams {
+            client: &client,
+            phase: Phase::IdleLatency,
+            during: None,
+            total_duration: self.cfg.idle_latency_duration,
+            interval_ms: self.cfg.probe_interval_ms,
+            timeout_ms: self.cfg.probe_timeout_ms,
+            event_tx: &event_tx,
+            paused: paused.clone(),
+            cancel: cancel.clone(),
+        })
         .await?;
 
         if self.cfg.experimental {
-            event_tx
-                .send(TestEvent::Info {
-                    message: "Fetching TURN info (experimental)".into(),
-                })
-                .await
-                .ok();
+            let _ = event_tx.send(TestEvent::Info(InfoEvent::FetchingTurn));
         }
 
-        event_tx
-            .send(TestEvent::PhaseStarted {
-                phase: Phase::Download,
-            })
-            .await
-            .ok();
+        let _ = event_tx.send(TestEvent::PhaseStarted {
+            phase: Phase::Download,
+        });
 
         let (download, loaded_latency_download) = throughput::run_download_with_loaded_latency(
             &client,
@@ -120,12 +109,9 @@ impl TestEngine {
         )
         .await?;
 
-        event_tx
-            .send(TestEvent::PhaseStarted {
-                phase: Phase::Upload,
-            })
-            .await
-            .ok();
+        let _ = event_tx.send(TestEvent::PhaseStarted {
+            phase: Phase::Upload,
+        });
 
         let (upload, loaded_latency_upload) = throughput::run_upload_with_loaded_latency(
             &client,
@@ -135,13 +121,6 @@ impl TestEngine {
             cancel.clone(),
         )
         .await?;
-
-        event_tx
-            .send(TestEvent::PhaseStarted {
-                phase: Phase::Summary,
-            })
-            .await
-            .ok();
 
         let mut turn = None;
         let mut experimental_udp = None;

@@ -1,5 +1,5 @@
 use crate::engine::cloudflare::CloudflareClient;
-use crate::engine::latency::run_latency_probes;
+use crate::engine::latency::{run_latency_probes, LatencyProbeParams};
 use crate::model::{LatencySummary, Phase, RunConfig, TestEvent, ThroughputSummary};
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -61,7 +61,7 @@ fn estimate_steady_window(
 pub async fn run_download_with_loaded_latency(
     client: &CloudflareClient,
     cfg: &RunConfig,
-    event_tx: &mpsc::Sender<TestEvent>,
+    event_tx: &mpsc::UnboundedSender<TestEvent>,
     paused: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
 ) -> Result<(ThroughputSummary, LatencySummary)> {
@@ -105,17 +105,17 @@ pub async fn run_download_with_loaded_latency(
     let cancel2 = cancel.clone();
     let cfg2 = cfg.clone();
     let lat_handle = tokio::spawn(async move {
-        let res = run_latency_probes(
-            &client2,
-            Phase::Download,
-            Some(Phase::Download),
-            cfg2.download_duration,
-            cfg2.probe_interval_ms,
-            cfg2.probe_timeout_ms,
-            &ev2,
-            paused2,
-            cancel2,
-        )
+        let res = run_latency_probes(LatencyProbeParams {
+            client: &client2,
+            phase: Phase::Download,
+            during: Some(Phase::Download),
+            total_duration: cfg2.download_duration,
+            interval_ms: cfg2.probe_interval_ms,
+            timeout_ms: cfg2.probe_timeout_ms,
+            event_tx: &ev2,
+            paused: paused2,
+            cancel: cancel2,
+        })
         .await
         .unwrap_or_else(|_| LatencySummary::failed());
         let _ = lat_tx.send(res).await;
@@ -145,14 +145,11 @@ pub async fn run_download_with_loaded_latency(
         samples.push((Instant::now(), now_total));
         mbps_samples.push(mbps_instant);
 
-        event_tx
-            .send(TestEvent::ThroughputTick {
-                phase: Phase::Download,
-                bytes_total: now_total,
-                bps_instant,
-            })
-            .await
-            .ok();
+        let _ = event_tx.send(TestEvent::ThroughputTick {
+            phase: Phase::Download,
+            bytes_total: now_total,
+            bps_instant,
+        });
 
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -182,7 +179,7 @@ pub async fn run_download_with_loaded_latency(
 pub async fn run_upload_with_loaded_latency(
     client: &CloudflareClient,
     cfg: &RunConfig,
-    event_tx: &mpsc::Sender<TestEvent>,
+    event_tx: &mpsc::UnboundedSender<TestEvent>,
     paused: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
 ) -> Result<(ThroughputSummary, LatencySummary)> {
@@ -241,17 +238,17 @@ pub async fn run_upload_with_loaded_latency(
     let cancel2 = cancel.clone();
     let cfg2 = cfg.clone();
     let lat_handle = tokio::spawn(async move {
-        let res = run_latency_probes(
-            &client2,
-            Phase::Upload,
-            Some(Phase::Upload),
-            cfg2.upload_duration,
-            cfg2.probe_interval_ms,
-            cfg2.probe_timeout_ms,
-            &ev2,
-            paused2,
-            cancel2,
-        )
+        let res = run_latency_probes(LatencyProbeParams {
+            client: &client2,
+            phase: Phase::Upload,
+            during: Some(Phase::Upload),
+            total_duration: cfg2.upload_duration,
+            interval_ms: cfg2.probe_interval_ms,
+            timeout_ms: cfg2.probe_timeout_ms,
+            event_tx: &ev2,
+            paused: paused2,
+            cancel: cancel2,
+        })
         .await
         .unwrap_or_else(|_| LatencySummary::failed());
         let _ = lat_tx.send(res).await;
@@ -281,17 +278,19 @@ pub async fn run_upload_with_loaded_latency(
         samples.push((Instant::now(), now_total));
         mbps_samples.push(mbps_instant);
 
-        event_tx
-            .send(TestEvent::ThroughputTick {
-                phase: Phase::Upload,
-                bytes_total: now_total,
-                bps_instant,
-            })
-            .await
-            .ok();
+        let _ = event_tx.send(TestEvent::ThroughputTick {
+            phase: Phase::Upload,
+            bytes_total: now_total,
+            bps_instant,
+        });
 
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+
+    // Switch phase as soon as the timed loop is done; finalization continues below.
+    let _ = event_tx.send(TestEvent::PhaseStarted {
+        phase: Phase::Summary,
+    });
 
     stop.store(true, Ordering::Relaxed);
     for h in handles {

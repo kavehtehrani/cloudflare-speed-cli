@@ -1,4 +1,4 @@
-use crate::model::TurnInfo;
+use crate::model::{InfoEvent, TestEvent, TurnInfo};
 use anyhow::{Context, Result};
 use reqwest::Url;
 use serde::Deserialize;
@@ -14,7 +14,10 @@ pub struct CloudflareClient {
 }
 
 impl CloudflareClient {
-    pub fn new(cfg: &RunConfig) -> Result<Self> {
+    pub fn new(
+        cfg: &RunConfig,
+        event_tx: Option<tokio::sync::mpsc::UnboundedSender<TestEvent>>,
+    ) -> Result<Self> {
         let base_url = Url::parse(&cfg.base_url).context("invalid base_url")?;
 
         let mut builder = reqwest::Client::builder()
@@ -28,10 +31,12 @@ impl CloudflareClient {
             match network_bind::get_interface_ip(iface) {
                 Ok(ip) => {
                     builder = builder.local_address(ip);
-                    eprintln!(
-                        "Binding HTTP connections to interface {} (IP: {})",
-                        iface, ip
-                    );
+                    if let Some(tx) = event_tx.as_ref() {
+                        let _ = tx.send(TestEvent::Info(InfoEvent::BindInterface {
+                            iface: iface.clone(),
+                            ip,
+                        }));
+                    }
                 }
                 Err(e) => {
                     return Err(anyhow::anyhow!(
@@ -46,7 +51,9 @@ impl CloudflareClient {
             match source_ip.parse::<std::net::IpAddr>() {
                 Ok(ip) => {
                     builder = builder.local_address(ip);
-                    eprintln!("Binding HTTP connections to source IP: {}", ip);
+                    if let Some(tx) = event_tx.as_ref() {
+                        let _ = tx.send(TestEvent::Info(InfoEvent::BindSourceIp { ip }));
+                    }
                 }
                 Err(e) => {
                     return Err(anyhow::anyhow!(

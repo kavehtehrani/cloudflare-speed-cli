@@ -1,15 +1,15 @@
 mod charts;
 
-use crate::cli::{build_config, Cli};
-use crate::engine::{EngineControl, TestEngine};
+use crate::cli::Cli;
 use crate::model::{Phase, RunResult, TestEvent};
+use crate::network::NetworkInfo;
+use crate::orchestrator::{self, UiCommand};
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use futures::{future, StreamExt};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -22,6 +22,7 @@ use ratatui::{
 };
 use std::{io, time::Duration, time::Instant};
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 struct UiState {
     tab: usize,
@@ -78,6 +79,7 @@ struct UiState {
     auto_save: bool,
     last_exported_path: Option<String>,
     // Network interface information
+    network_info: NetworkInfo,
     interface_name: Option<String>,
     network_name: Option<String>,
     is_wireless: Option<bool>,
@@ -135,6 +137,7 @@ impl Default for UiState {
             as_org: None,
             auto_save: true,
             last_exported_path: None,
+            network_info: NetworkInfo::default(),
             interface_name: None,
             network_name: None,
             is_wireless: None,
@@ -265,6 +268,39 @@ impl UiState {
 }
 
 pub async fn run(args: Cli) -> Result<()> {
+    // Unbounded channels avoid backpressure and task switching in the hot path.
+    let (event_tx, event_rx) = mpsc::unbounded_channel::<TestEvent>();
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<UiCommand>();
+
+    // Gather network info once outside the UI thread; UI only consumes the results.
+    let network_info = crate::network::gather_network_info(&args);
+
+    // TUI runs in a dedicated thread to keep all blocking I/O out of the Tokio runtime.
+    let ui_args = args.clone();
+    let ui_handle =
+        std::thread::spawn(move || run_threaded(ui_args, network_info, event_rx, cmd_tx));
+
+    let res = orchestrator::run_controller(&args, event_tx, cmd_rx).await;
+
+    let join_res = tokio::task::spawn_blocking(move || ui_handle.join()).await;
+    if let Ok(joined) = join_res {
+        match joined {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(anyhow::anyhow!("TUI thread panicked")),
+        }
+    }
+
+    res
+}
+
+/// Run the TUI loop on a dedicated thread.
+pub fn run_threaded(
+    args: Cli,
+    network_info: NetworkInfo,
+    mut event_rx: UnboundedReceiver<TestEvent>,
+    cmd_tx: UnboundedSender<UiCommand>,
+) -> Result<()> {
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).ok();
@@ -273,13 +309,10 @@ pub async fn run(args: Cli) -> Result<()> {
     let mut terminal = Terminal::new(backend).context("create terminal")?;
     terminal.clear().ok();
 
-    // Get terminal size to determine initial history load
-    // Load 3x the visible height initially (for smooth scrolling)
-    // Default to 24 rows if we can't get terminal size
     let initial_load = terminal
         .size()
         .map(|size| ((size.height as usize).saturating_sub(2) * 3).max(20))
-        .unwrap_or(66); // Default: (24-2)*3 = 66 items
+        .unwrap_or(66);
 
     let mut state = UiState {
         phase: Phase::IdleLatency,
@@ -287,12 +320,12 @@ pub async fn run(args: Cli) -> Result<()> {
         comments: args.comments.clone(),
         ..Default::default()
     };
+    // UiState is owned by the UI thread only; no cross-thread mutation.
     state.initial_history_load_size = initial_load;
     state.history = crate::storage::load_recent(initial_load).unwrap_or_default();
     state.history_loaded_count = state.history.len();
 
-    // Gather network interface information using shared module
-    let network_info = crate::network::gather_network_info(&args);
+    state.network_info = network_info.clone();
     state.interface_name = network_info.interface_name.clone();
     state.network_name = network_info.network_name.clone();
     state.is_wireless = network_info.is_wireless;
@@ -305,386 +338,299 @@ pub async fn run(args: Cli) -> Result<()> {
         .and_then(|n| n.to_str())
         .map(|s| s.to_string());
 
-    let mut events = EventStream::new();
-    let mut tick = tokio::time::interval(Duration::from_millis(100));
-
-    // Start first run if test_on_launch is enabled
-    let mut run_ctx = if args.test_on_launch {
-        Some(start_run(&args).await?)
-    } else {
-        None
-    };
+    let tick_rate = Duration::from_millis(100);
+    let mut last_tick = Instant::now();
 
     let res = loop {
-        tokio::select! {
-            _ = tick.tick() => {
-                terminal.draw(|f| draw(f.area(), f, &state)).ok();
-            }
-            maybe_ev = events.next() => {
-                let Some(Ok(ev)) = maybe_ev else { continue };
-                if let Event::Key(k) = ev {
-                    if k.kind != KeyEventKind::Press {
-                        continue;
-                    }
-                    match (k.modifiers, k.code) {
-                        (_, KeyCode::Char('q')) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-                            if let Some(ref ctx) = run_ctx {
-                                ctx.ctrl_tx.send(EngineControl::Cancel).await.ok();
-                            }
-                            break Ok(());
-                        }
-                        (_, KeyCode::Char('p')) => {
-                            if let Some(ref ctx) = run_ctx {
-                                state.paused = !state.paused;
-                                ctx.ctrl_tx.send(EngineControl::Pause(state.paused)).await.ok();
-                            }
-                        }
-                        (_, KeyCode::Char('r')) => {
-                            // Refresh history (only when on history tab)
-                            if state.tab == 1 {
-                                let reload_size = state.initial_history_load_size.max(state.history_loaded_count);
-                                match crate::storage::load_recent(reload_size) {
-                                    Ok(new_history) => {
-                                        let old_count = state.history.len();
-                                        state.history = new_history;
-                                        state.history_loaded_count = state.history.len();
-
-                                        // Adjust selection if needed
-                                        if state.history_selected >= state.history.len() && !state.history.is_empty() {
-                                            state.history_selected = state.history.len() - 1;
-                                        } else if state.history.is_empty() {
-                                            state.history_selected = 0;
-                                            state.history_scroll_offset = 0;
-                                        }
-
-                                        // Adjust scroll offset if needed
-                                        if state.history_scroll_offset >= state.history.len() && !state.history.is_empty() {
-                                            state.history_scroll_offset = state.history.len().saturating_sub(20).max(0);
-                                        }
-
-                                        let new_count = state.history.len();
-                                        if new_count > old_count {
-                                            state.info = format!("Refreshed: {} new run(s)", new_count - old_count);
-                                        } else if new_count < old_count {
-                                            state.info = format!("Refreshed: {} run(s) removed", old_count - new_count);
-                                        } else {
-                                            state.info = "Refreshed".into();
-                                        }
-                                    }
-                                    Err(e) => {
-                                        state.info = format!("Refresh failed: {e:#}");
-                                    }
-                                }
-                            } else {
-                                // Rerun (only when NOT on history tab)
-                                state.info = "Restarting…".into();
-                                if let Some(ref mut ctx) = run_ctx {
-                                    ctx.ctrl_tx.send(EngineControl::Cancel).await.ok();
-                                    if let Some(h) = ctx.handle.take() {
-                                        let _ = h.await;
-                                    }
-                                }
-                                state.last_result = None;
-                                state.run_start = Instant::now();
-                                state.dl_series.clear();
-                                state.ul_series.clear();
-                                state.idle_lat_series.clear();
-                                state.loaded_dl_lat_series.clear();
-                                state.loaded_ul_lat_series.clear();
-                                state.dl_points.clear();
-                                state.ul_points.clear();
-                                state.idle_lat_points.clear();
-                                state.loaded_dl_lat_points.clear();
-                                state.loaded_ul_lat_points.clear();
-                                state.dl_mbps = 0.0;
-                                state.ul_mbps = 0.0;
-                                state.dl_avg_mbps = 0.0;
-                                state.ul_avg_mbps = 0.0;
-                                state.dl_bytes_total = 0;
-                                state.ul_bytes_total = 0;
-                                state.dl_phase_start = None;
-                                state.ul_phase_start = None;
-                                state.idle_latency_samples.clear();
-                                state.loaded_dl_latency_samples.clear();
-                                state.loaded_ul_latency_samples.clear();
-                                state.idle_latency_sent = 0;
-                                state.idle_latency_received = 0;
-                                state.loaded_dl_latency_sent = 0;
-                                state.loaded_dl_latency_received = 0;
-                                state.loaded_ul_latency_sent = 0;
-                                state.loaded_ul_latency_received = 0;
-                                state.phase = Phase::IdleLatency;
-                                state.paused = false;
-                                run_ctx = Some(start_run(&args).await?);
-                            }
-                        }
-                        (_, KeyCode::Char('s')) => {
-                            // Only save on dashboard (auto-save location)
-                            if state.tab == 0 {
-                                if let Some(r) = state.last_result.clone() {
-                                    save_and_show_path(&r, &mut state);
-                                } else {
-                                    state.info = "No completed run to save yet.".into();
-                                }
-                            }
-                        }
-                        // Export functions only work in history tab
-                        (_, KeyCode::Char('e')) => {
-                            if state.tab == 1 && !state.history.is_empty() {
-                                if state.history_selected < state.history.len() {
-                                    let r = &state.history[state.history_selected];
-                                    match export_result_json(r, &state) {
-                                        Ok(p) => {
-                                            let path_str = p.to_string_lossy().to_string();
-                                            state.last_exported_path = Some(path_str.clone());
-                                            state.info = format!("Exported JSON: {} (press 'y' to copy path)", p.display());
-                                        }
-                                        Err(e) => {
-                                            state.info = format!("JSON export failed: {e:#}");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        (_, KeyCode::Char('c')) => {
-                            if state.tab == 1 && !state.history.is_empty() {
-                                if state.history_selected < state.history.len() {
-                                    let r = &state.history[state.history_selected];
-                                    match export_result_csv(r, &state) {
-                                        Ok(p) => {
-                                            let path_str = p.to_string_lossy().to_string();
-                                            state.last_exported_path = Some(path_str.clone());
-                                            state.info = format!("Exported CSV: {} (press 'y' to copy path)", p.display());
-                                        }
-                                        Err(e) => {
-                                            state.info = format!("CSV export failed: {e:#}");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        (_, KeyCode::Char('y')) => {
-                            // Copy last exported path to clipboard (yank)
-                            if state.tab == 1 {
-                                if let Some(ref path) = state.last_exported_path {
-                                    match copy_to_clipboard(path) {
-                                        Ok(_) => {
-                                            // Truncate very long paths in the message
-                                            let display_path = if path.len() > 60 {
-                                                format!("{}...", &path[..57])
-                                            } else {
-                                                path.clone()
-                                            };
-                                            state.info = format!("✓ Copied to clipboard: {}", display_path);
-                                        }
-                                        Err(e) => {
-                                            state.info = format!("Clipboard copy failed: {e:#}");
-                                        }
-                                    }
-                                } else {
-                                    state.info = "No exported file path to copy. Export a file first (e/c)".into();
-                                }
-                            }
-                        }
-                        (_, KeyCode::Char('a')) => {
-                            state.auto_save = !state.auto_save;
-                            state.info = if state.auto_save {
-                                "Auto-save enabled".into()
-                            } else {
-                                "Auto-save disabled".into()
-                            };
-                        }
-                        (_, KeyCode::Tab) => {
-                            let new_tab = (state.tab + 1) % 3;
-                            state.tab = new_tab;
-                            // Reset history selection when switching to history tab
-                            if new_tab == 1 {
-                                state.history_selected = 0;
-                                state.history_scroll_offset = 0;
-                            }
-                        }
-                        (_, KeyCode::Char('?')) => {
-                            state.tab = 2; // help
-                        }
-                        // History navigation and deletion (only when on History tab)
-                        (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
-                            if state.tab == 1 && !state.history.is_empty() {
-                                // Up/k goes to newer items (lower index, towards 0)
-                                if state.history_selected > 0 {
-                                    state.history_selected -= 1;
-                                    // Auto-scroll: if selected item is above visible area, scroll up
-                                    if state.history_selected < state.history_scroll_offset {
-                                        state.history_scroll_offset = state.history_selected;
-                                    }
-                                }
-                            }
-                        }
-                        (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
-                            if state.tab == 1 && !state.history.is_empty() {
-                                // Down/j goes to older items (higher index in array)
-                                // Allow navigation through all items; display will show what fits
-                                if state.history_selected < state.history.len().saturating_sub(1) {
-                                    state.history_selected += 1;
-                                    // Auto-scroll: keep selected item visible
-                                    // Use a reasonable estimate for max_items (will be recalculated in draw)
-                                    let estimated_max_items = 30; // reasonable default
-                                    if state.history_selected >= state.history_scroll_offset + estimated_max_items {
-                                        state.history_scroll_offset = state.history_selected.saturating_sub(estimated_max_items - 1);
-                                    }
-
-                                    // Lazy load: if we're near the end of loaded items, load more
-                                    let load_threshold = state.history_loaded_count.saturating_sub(10);
-                                    if state.history_selected >= load_threshold && state.history_loaded_count == state.history.len() {
-                                        // Load more items (another batch of the same size)
-                                        let current_count = state.history.len();
-                                        let load_more = current_count.max(20); // Load at least as many as we have, or 20
-                                        if let Ok(more_history) = crate::storage::load_recent(load_more) {
-                                            // Only add items we don't already have
-                                            let existing_ids: std::collections::HashSet<_> = state.history
-                                                .iter()
-                                                .map(|r| &r.meas_id)
-                                                .collect();
-                                            let new_items: Vec<_> = more_history
-                                                .into_iter()
-                                                .filter(|r| !existing_ids.contains(&r.meas_id))
-                                                .collect();
-                                            if !new_items.is_empty() {
-                                                state.history.extend(new_items);
-                                                state.history_loaded_count = state.history.len();
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        (_, KeyCode::Char('d')) => {
-                            if state.tab == 1 && !state.history.is_empty() {
-                                // history_selected directly maps to history index (newest first)
-                                if state.history_selected < state.history.len() {
-                                    let to_delete = state.history[state.history_selected].clone();
-                                    if let Err(e) = crate::storage::delete_run(&to_delete) {
-                                        state.info = format!("Delete failed: {e:#}");
-                                    } else {
-                                        state.history.remove(state.history_selected);
-                                        // Adjust scroll offset if needed
-                                        if state.history_scroll_offset >= state.history.len() && !state.history.is_empty() {
-                                            state.history_scroll_offset = state.history.len().saturating_sub(20).max(0);
-                                        }
-                                        // Adjust selection if needed
-                                        if state.history_selected >= state.history.len() && !state.history.is_empty() {
-                                            state.history_selected = state.history.len() - 1;
-                                        } else if state.history.is_empty() {
-                                            state.history_selected = 0;
-                                            state.history_scroll_offset = 0;
-                                        }
-                                        state.info = "Deleted".into();
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
+        // Drain events without blocking to keep UI responsive; unbounded channel avoids backpressure.
+        while let Ok(ev) = event_rx.try_recv() {
+            match ev {
+                TestEvent::RunCompleted { result } => {
+                    handle_run_completed(&args, &mut state, *result);
                 }
+                other => apply_event(&mut state, other),
             }
-            // wrapping in conditional async to avoid spiking cpu usage when run_ctx is None
-            maybe_engine_ev = async {
-                if let Some(ref mut ctx) = run_ctx {
-                    ctx.event_rx.recv().await
-                } else {
-                    future::pending().await
+        }
+
+        if last_tick.elapsed() >= tick_rate {
+            terminal.draw(|f| draw(f.area(), f, &state)).ok();
+            last_tick = Instant::now();
+        }
+
+        // Poll input with a short timeout to avoid blocking the render loop.
+        if event::poll(Duration::from_millis(10)).unwrap_or(false) {
+            if let Ok(Event::Key(k)) = event::read() {
+                if k.kind != KeyEventKind::Press {
+                    continue;
                 }
-            } => {
-                match maybe_engine_ev {
-                    None => {
-                        // engine finished; wait for result
-                        if let Some(ctx) = &mut run_ctx {
-                            if let Some(h) = ctx.handle.take() {
-                            match h.await {
-                                Ok(Ok(r)) => {
-                                    if state.auto_save {
-                                        save_and_show_path(&r, &mut state);
-                                    }
-                                    if let Some(meta) = r.meta.as_ref() {
-                                        let extracted = crate::network::extract_metadata(meta);
-                                        state.ip = extracted.ip;
-                                        state.colo = extracted.colo;
-                                        state.asn = extracted.asn;
-                                        state.as_org = extracted.as_org;
-                                    }
-                                    // Server should be set from RunResult.server
-                                    if r.server.is_some() {
-                                        state.server = r.server.clone();
-                                    }
-                                    // Enrich result with network info before storing
-                                    let enriched = enrich_result_with_network_info(&r, &state);
-                                    state.last_result = Some(enriched.clone());
-
-                                    // Handle command-line export flags
-                                    let mut export_messages = Vec::new();
-                                    if let Some(export_path) = args.export_json.as_deref() {
-                                        match crate::storage::export_json(export_path, &enriched) {
-                                            Ok(_) => export_messages.push(format!("Exported JSON: {}", export_path.display())),
-                                            Err(e) => export_messages.push(format!("Export JSON failed: {e:#}")),
-                                        }
-                                    }
-                                    if let Some(export_path) = args.export_csv.as_deref() {
-                                        match crate::storage::export_csv(export_path, &enriched) {
-                                            Ok(_) => export_messages.push(format!("Exported CSV: {}", export_path.display())),
-                                            Err(e) => export_messages.push(format!("Export CSV failed: {e:#}")),
-                                        }
-                                    }
-                                    if !export_messages.is_empty() {
-                                        state.info = export_messages.join("; ");
-                                    }
-
-                                    // Reload history to include the new test
-                                    // Load at least one more than we had before to ensure the new test is included
-                                    let reload_size = (state.history_loaded_count + 1).max(state.initial_history_load_size);
-                                    state.history = crate::storage::load_recent(reload_size).unwrap_or_default();
+                match (k.modifiers, k.code) {
+                    (_, KeyCode::Char('q')) | (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+                        let _ = cmd_tx.send(UiCommand::Quit);
+                        break Ok(());
+                    }
+                    (_, KeyCode::Char('p')) => {
+                        state.paused = !state.paused;
+                        let _ = cmd_tx.send(UiCommand::Pause(state.paused));
+                    }
+                    (_, KeyCode::Char('r')) => {
+                        if state.tab == 1 {
+                            let reload_size = state
+                                .initial_history_load_size
+                                .max(state.history_loaded_count);
+                            match crate::storage::load_recent(reload_size) {
+                                Ok(new_history) => {
+                                    let old_count = state.history.len();
+                                    state.history = new_history;
                                     state.history_loaded_count = state.history.len();
-                                    // Reset selection to show the new test (most recent) if on history tab
-                                    if state.tab == 1 {
+
+                                    if state.history_selected >= state.history.len()
+                                        && !state.history.is_empty()
+                                    {
+                                        state.history_selected = state.history.len() - 1;
+                                    } else if state.history.is_empty() {
                                         state.history_selected = 0;
                                         state.history_scroll_offset = 0;
                                     }
+
+                                    if state.history_scroll_offset >= state.history.len()
+                                        && !state.history.is_empty()
+                                    {
+                                        state.history_scroll_offset =
+                                            state.history.len().saturating_sub(20).max(0);
+                                    }
+
+                                    let new_count = state.history.len();
+                                    if new_count > old_count {
+                                        state.info = format!(
+                                            "Refreshed: {} new run(s)",
+                                            new_count - old_count
+                                        );
+                                    } else if new_count < old_count {
+                                        state.info = format!(
+                                            "Refreshed: {} run(s) removed",
+                                            old_count - new_count
+                                        );
+                                    } else {
+                                        state.info = "Refreshed".into();
+                                    }
                                 }
-                                Ok(Err(e)) => state.info = format!("Run failed: {e:#}"),
-                                Err(e) => state.info = format!("Run join failed: {e}"),
+                                Err(e) => {
+                                    state.info = format!("Refresh failed: {e:#}");
+                                }
                             }
-                            }
-                            run_ctx = None;
+                        } else {
+                            state.info = "Restart requested…".into();
+                            let _ = cmd_tx.send(UiCommand::Restart);
+                            state.last_result = None;
+                            state.run_start = Instant::now();
+                            state.dl_series.clear();
+                            state.ul_series.clear();
+                            state.idle_lat_series.clear();
+                            state.loaded_dl_lat_series.clear();
+                            state.loaded_ul_lat_series.clear();
+                            state.dl_points.clear();
+                            state.ul_points.clear();
+                            state.idle_lat_points.clear();
+                            state.loaded_dl_lat_points.clear();
+                            state.loaded_ul_lat_points.clear();
+                            state.dl_mbps = 0.0;
+                            state.ul_mbps = 0.0;
+                            state.dl_avg_mbps = 0.0;
+                            state.ul_avg_mbps = 0.0;
+                            state.dl_bytes_total = 0;
+                            state.ul_bytes_total = 0;
+                            state.dl_phase_start = None;
+                            state.ul_phase_start = None;
+                            state.idle_latency_samples.clear();
+                            state.loaded_dl_latency_samples.clear();
+                            state.loaded_ul_latency_samples.clear();
+                            state.idle_latency_sent = 0;
+                            state.idle_latency_received = 0;
+                            state.loaded_dl_latency_sent = 0;
+                            state.loaded_dl_latency_received = 0;
+                            state.loaded_ul_latency_sent = 0;
+                            state.loaded_ul_latency_received = 0;
+                            state.phase = Phase::IdleLatency;
+                            state.paused = false;
                         }
                     }
-                    Some(ev) => apply_event(&mut state, ev),
+                    (_, KeyCode::Char('s')) => {
+                        if state.tab == 0 {
+                            if let Some(r) = state.last_result.clone() {
+                                save_and_show_path(&r, &mut state);
+                            } else {
+                                state.info = "No completed run to save yet.".into();
+                            }
+                        }
+                    }
+                    (_, KeyCode::Char('e')) => {
+                        if state.tab == 1
+                            && !state.history.is_empty()
+                            && state.history_selected < state.history.len()
+                        {
+                            let r = &state.history[state.history_selected];
+                            match export_result_json(r, &state) {
+                                Ok(p) => {
+                                    let path_str = p.to_string_lossy().to_string();
+                                    state.last_exported_path = Some(path_str.clone());
+                                    state.info = format!(
+                                        "Exported JSON: {} (press 'y' to copy path)",
+                                        p.display()
+                                    );
+                                }
+                                Err(e) => {
+                                    state.info = format!("JSON export failed: {e:#}");
+                                }
+                            }
+                        }
+                    }
+                    (_, KeyCode::Char('c')) => {
+                        if state.tab == 1
+                            && !state.history.is_empty()
+                            && state.history_selected < state.history.len()
+                        {
+                            let r = &state.history[state.history_selected];
+                            match export_result_csv(r, &state) {
+                                Ok(p) => {
+                                    let path_str = p.to_string_lossy().to_string();
+                                    state.last_exported_path = Some(path_str.clone());
+                                    state.info = format!(
+                                        "Exported CSV: {} (press 'y' to copy path)",
+                                        p.display()
+                                    );
+                                }
+                                Err(e) => {
+                                    state.info = format!("CSV export failed: {e:#}");
+                                }
+                            }
+                        }
+                    }
+                    (_, KeyCode::Char('y')) => {
+                        if state.tab == 1 {
+                            if let Some(ref path) = state.last_exported_path {
+                                match copy_to_clipboard(path) {
+                                    Ok(_) => {
+                                        let display_path = if path.len() > 60 {
+                                            format!("{}...", &path[..57])
+                                        } else {
+                                            path.clone()
+                                        };
+                                        state.info =
+                                            format!("✓ Copied to clipboard: {}", display_path);
+                                    }
+                                    Err(e) => {
+                                        state.info = format!("Clipboard copy failed: {e:#}");
+                                    }
+                                }
+                            } else {
+                                state.info =
+                                    "No exported file path to copy. Export a file first (e/c)"
+                                        .into();
+                            }
+                        }
+                    }
+                    (_, KeyCode::Char('a')) => {
+                        state.auto_save = !state.auto_save;
+                        state.info = if state.auto_save {
+                            "Auto-save enabled".into()
+                        } else {
+                            "Auto-save disabled".into()
+                        };
+                    }
+                    (_, KeyCode::Tab) => {
+                        let new_tab = (state.tab + 1) % 3;
+                        state.tab = new_tab;
+                        if new_tab == 1 {
+                            state.history_selected = 0;
+                            state.history_scroll_offset = 0;
+                        }
+                    }
+                    (_, KeyCode::Char('?')) => {
+                        state.tab = 2;
+                    }
+                    (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
+                        if state.tab == 1 && !state.history.is_empty() && state.history_selected > 0
+                        {
+                            state.history_selected -= 1;
+                            if state.history_selected < state.history_scroll_offset {
+                                state.history_scroll_offset = state.history_selected;
+                            }
+                        }
+                    }
+                    (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
+                        if state.tab == 1
+                            && !state.history.is_empty()
+                            && state.history_selected < state.history.len().saturating_sub(1)
+                        {
+                            state.history_selected += 1;
+                            let estimated_max_items = 30;
+                            if state.history_selected
+                                >= state.history_scroll_offset + estimated_max_items
+                            {
+                                state.history_scroll_offset = state
+                                    .history_selected
+                                    .saturating_sub(estimated_max_items - 1);
+                            }
+
+                            let load_threshold = state.history_loaded_count.saturating_sub(10);
+                            if state.history_selected >= load_threshold
+                                && state.history_loaded_count == state.history.len()
+                            {
+                                let current_count = state.history.len();
+                                let load_more = current_count.max(20);
+                                if let Ok(more_history) = crate::storage::load_recent(load_more) {
+                                    let existing_ids: std::collections::HashSet<_> =
+                                        state.history.iter().map(|r| &r.meas_id).collect();
+                                    let new_items: Vec<_> = more_history
+                                        .into_iter()
+                                        .filter(|r| !existing_ids.contains(&r.meas_id))
+                                        .collect();
+                                    if !new_items.is_empty() {
+                                        state.history.extend(new_items);
+                                        state.history_loaded_count = state.history.len();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    (_, KeyCode::Char('d')) => {
+                        if state.tab == 1
+                            && !state.history.is_empty()
+                            && state.history_selected < state.history.len()
+                        {
+                            let to_delete = state.history[state.history_selected].clone();
+                            if let Err(e) = crate::storage::delete_run(&to_delete) {
+                                state.info = format!("Delete failed: {e:#}");
+                            } else {
+                                state.history.remove(state.history_selected);
+                                if state.history_scroll_offset >= state.history.len()
+                                    && !state.history.is_empty()
+                                {
+                                    state.history_scroll_offset =
+                                        state.history.len().saturating_sub(20).max(0);
+                                }
+                                if state.history_selected >= state.history.len()
+                                    && !state.history.is_empty()
+                                {
+                                    state.history_selected = state.history.len() - 1;
+                                } else if state.history.is_empty() {
+                                    state.history_selected = 0;
+                                    state.history_scroll_offset = 0;
+                                }
+                                state.info = "Deleted".into();
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
     };
 
-    // Restore terminal.
     disable_raw_mode().ok();
     let mut stdout = io::stdout();
     execute!(stdout, LeaveAlternateScreen).ok();
     res
-}
-
-struct RunCtx {
-    ctrl_tx: mpsc::Sender<EngineControl>,
-    event_rx: mpsc::Receiver<TestEvent>,
-    handle: Option<tokio::task::JoinHandle<Result<RunResult>>>,
-}
-
-async fn start_run(args: &Cli) -> Result<RunCtx> {
-    let cfg = build_config(args);
-    let (event_tx, event_rx) = mpsc::channel::<TestEvent>(4096);
-    let (ctrl_tx, ctrl_rx) = mpsc::channel::<EngineControl>(32);
-    let engine = TestEngine::new(cfg);
-    let handle = tokio::spawn(async move { engine.run(event_tx, ctrl_rx).await });
-    Ok(RunCtx {
-        ctrl_tx,
-        event_rx,
-        handle: Some(handle),
-    })
 }
 
 fn apply_event(state: &mut UiState, ev: TestEvent) {
@@ -720,7 +666,7 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
                 _ => {}
             }
         }
-        TestEvent::Info { message } => state.info = message,
+        TestEvent::Info(info) => state.info = info.to_message(),
         TestEvent::MetaInfo { meta } => {
             // Extract IP, colo, ASN, and org from meta
             let extracted = crate::network::extract_metadata(&meta);
@@ -839,6 +785,43 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
                 _ => {}
             }
         }
+        TestEvent::RunCompleted { .. } => {}
+    }
+}
+
+fn handle_run_completed(args: &Cli, state: &mut UiState, r: RunResult) {
+    let reload_size = (state.history_loaded_count + 1).max(state.initial_history_load_size);
+    let processed = orchestrator::process_run_completion(
+        args,
+        &state.network_info,
+        reload_size,
+        state.auto_save,
+        &r,
+    );
+
+    state.last_result = Some(processed.enriched.clone());
+    state.ip = processed.enriched.ip.clone();
+    state.colo = processed.enriched.colo.clone();
+    state.asn = processed.enriched.asn.clone();
+    state.as_org = processed.enriched.as_org.clone();
+    state.server = processed.enriched.server.clone();
+
+    if let Some(path) = processed.auto_saved_path.as_ref() {
+        if path.exists() {
+            state.info = format!("Saved: {}", path.display());
+        } else {
+            state.info = format!("Saved (verifying): {}", path.display());
+        }
+    }
+    if !processed.export_messages.is_empty() {
+        state.info = processed.export_messages.join("; ");
+    }
+
+    state.history = processed.history;
+    state.history_loaded_count = state.history.len();
+    if state.tab == 1 {
+        state.history_selected = 0;
+        state.history_scroll_offset = 0;
     }
 }
 
@@ -870,7 +853,6 @@ fn draw(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
 }
 
 /// Helper function to render a box plot with metrics inside the same bordered box
-
 fn draw_dashboard(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
     // Small terminal: keep the compact dashboard (gauges + sparklines).
     // Large terminal: show full charts (like the website) alongside the live cards.
@@ -931,13 +913,15 @@ fn draw_dashboard(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
         ]);
         charts::render_chart_with_metrics_inside(
             f,
-            thr_row[0],
-            vec![dl_ds],
-            Axis::default().bounds([dl_x_min, dl_x_max.max(1.0)]),
-            Axis::default().title("Mbps").bounds([0.0, y_dl_max]),
-            dl_title,
-            dl_metrics,
-            Color::Green,
+            charts::ChartRenderParams {
+                area: thr_row[0],
+                datasets: vec![dl_ds],
+                x_axis: Axis::default().bounds([dl_x_min, dl_x_max.max(1.0)]),
+                y_axis: Axis::default().title("Mbps").bounds([0.0, y_dl_max]),
+                title: dl_title,
+                metrics: dl_metrics,
+                color: Color::Green,
+            },
         );
     } else {
         // Show empty placeholder when download hasn't started
@@ -995,13 +979,15 @@ fn draw_dashboard(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
         ]);
         charts::render_chart_with_metrics_inside(
             f,
-            thr_row[1],
-            vec![ul_ds],
-            Axis::default().bounds([ul_x_min, ul_x_max.max(1.0)]),
-            Axis::default().title("Mbps").bounds([0.0, y_ul_max]),
-            ul_title,
-            ul_metrics,
-            Color::Cyan,
+            charts::ChartRenderParams {
+                area: thr_row[1],
+                datasets: vec![ul_ds],
+                x_axis: Axis::default().bounds([ul_x_min, ul_x_max.max(1.0)]),
+                y_axis: Axis::default().title("Mbps").bounds([0.0, y_ul_max]),
+                title: ul_title,
+                metrics: ul_metrics,
+                color: Color::Cyan,
+            },
         );
     } else {
         // Show empty placeholder when upload hasn't started
@@ -1158,7 +1144,7 @@ fn draw_dashboard(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
                 state
                     .network_name
                     .as_deref()
-                    .or_else(|| state.interface_name.as_deref())
+                    .or(state.interface_name.as_deref())
                     .unwrap_or("-"),
             ),
         ]),
@@ -1494,7 +1480,7 @@ fn draw_dashboard_compact(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
                 state
                     .network_name
                     .as_deref()
-                    .or_else(|| state.interface_name.as_deref())
+                    .or(state.interface_name.as_deref())
                     .unwrap_or("-"),
             ),
         ]),
@@ -2044,7 +2030,7 @@ fn draw_history(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
             ),
             Span::raw("  "),
             Span::styled(
-                format!("{}", r.interface_name.as_deref().unwrap_or("-")),
+                r.interface_name.as_deref().unwrap_or("-").to_string(),
                 if is_selected {
                     style
                 } else {
@@ -2053,13 +2039,11 @@ fn draw_history(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
             ),
             Span::raw("  "),
             Span::styled(
-                format!(
-                    "{}",
-                    r.network_name
-                        .as_deref()
-                        .or_else(|| r.interface_name.as_deref())
-                        .unwrap_or("-")
-                ),
+                r.network_name
+                    .as_deref()
+                    .or(r.interface_name.as_deref())
+                    .unwrap_or("-")
+                    .to_string(),
                 if is_selected {
                     style
                 } else {
@@ -2115,19 +2099,18 @@ fn draw_history(area: Rect, f: &mut ratatui::Frame, state: &UiState) {
                 break;
             } else {
                 // Need to split - find a good break point
-                let mut char_count = 0;
+                let line_width_usize = line_width as usize;
                 let mut last_sep_pos = None;
                 let mut break_pos = 0;
 
-                for (idx, ch) in remaining.char_indices() {
-                    if char_count >= line_width {
+                for (char_count, (idx, ch)) in remaining.char_indices().enumerate() {
+                    if char_count >= line_width_usize {
                         break;
                     }
                     if ch == '/' || ch == '\\' {
                         last_sep_pos = Some(idx);
                     }
                     break_pos = idx + ch.len_utf8();
-                    char_count += 1;
                 }
 
                 // Prefer breaking at path separator, otherwise break at line width
