@@ -304,8 +304,8 @@ pub fn draw_charts(area: Rect, f: &mut Frame, state: &UiState) {
     // Calculate how many bars can fit based on available width
     // Chart width = chunks[1].width - Y-axis label width (6) - borders (2)
     let available_chart_width = chunks[1].width.saturating_sub(8) as usize;
-    // With bar_width=1 and bar_gap=0, max bars equals available width
-    let max_bars = available_chart_width.max(1).min(100);
+    // Cap at 200 bars max for performance, but allow wider bars on ultra-wide screens
+    let max_bars = available_chart_width.max(1).min(200);
 
     // Prepare data for charts: take only as many as can fit, then reverse so oldest is on left, newest on right
     let data_points: Vec<_> = filtered_data
