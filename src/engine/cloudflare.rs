@@ -105,6 +105,17 @@ impl CloudflareClient {
             builder = builder.add_root_certificate(cert);
         }
 
+        // Configure proxy if specified
+        if let Some(ref proxy_url) = cfg.proxy {
+            let proxy = reqwest::Proxy::all(proxy_url).with_context(|| {
+                format!(
+                    "invalid proxy URL '{}'. Expected format: [protocol://]host[:port]",
+                    proxy_url
+                )
+            })?;
+            builder = builder.proxy(proxy);
+        }
+
         let http = builder.build().context("failed to build http client")?;
 
         Ok(Self {

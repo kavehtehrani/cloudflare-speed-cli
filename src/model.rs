@@ -22,6 +22,7 @@ pub struct RunConfig {
     pub experimental: bool,
     pub interface: Option<String>,
     pub source_ip: Option<String>,
+    pub proxy: Option<String>,
     pub certificate_path: Option<std::path::PathBuf>,
     // Diagnostic options
     pub measure_dns: bool,

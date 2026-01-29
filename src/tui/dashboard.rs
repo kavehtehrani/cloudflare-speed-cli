@@ -321,6 +321,14 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
         ]));
     }
 
+    // Only show Proxy line if a proxy is set
+    if let Some(ref proxy_url) = state.proxy_url {
+        network_lines.push(Line::from(vec![
+            Span::styled("Proxy: ", Style::default().fg(Color::Gray)),
+            Span::styled(proxy_url, Style::default().fg(Color::Yellow)),
+        ]));
+    }
+
     network_lines.extend(vec![
         Line::from(vec![
             Span::styled("Server location: ", Style::default().fg(Color::Gray)),
@@ -718,6 +726,14 @@ pub fn draw_dashboard_compact(area: Rect, f: &mut Frame, state: &UiState) {
         meta_lines.push(Line::from(vec![
             Span::styled("Certificate: ", Style::default().fg(Color::Gray)),
             Span::raw(cert_filename),
+        ]));
+    }
+
+    // Only show Proxy line if a proxy is set
+    if let Some(ref proxy_url) = state.proxy_url {
+        meta_lines.push(Line::from(vec![
+            Span::styled("Proxy: ", Style::default().fg(Color::Gray)),
+            Span::styled(proxy_url, Style::default().fg(Color::Yellow)),
         ]));
     }
 

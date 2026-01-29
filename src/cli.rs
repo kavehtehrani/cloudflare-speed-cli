@@ -85,6 +85,10 @@ pub struct Cli {
     #[arg(long)]
     pub source: Option<String>,
 
+    /// Route traffic through a proxy (HTTP, HTTPS, or SOCKS5)
+    #[arg(long)]
+    pub proxy: Option<String>,
+
     /// Path to a custom TLS certificate file (PEM or DER format)
     #[arg(long)]
     pub certificate: Option<std::path::PathBuf>,
@@ -128,6 +132,14 @@ pub async fn run(args: Cli) -> Result<()> {
         return Err(anyhow::anyhow!(
             "--silent can only be used with --json. Use --silent --json together."
         ));
+    }
+
+    // Warn when using a proxy
+    if let Some(ref proxy_url) = args.proxy {
+        eprintln!(
+            "Warning: using proxy {}. Speed results reflect performance through the proxy, not your direct connection.",
+            proxy_url
+        );
     }
 
     // Silent mode takes precedence over other output modes
@@ -181,6 +193,7 @@ pub fn build_config(args: &Cli) -> RunConfig {
         experimental: args.experimental,
         interface: args.interface.clone(),
         source_ip: args.source.clone(),
+        proxy: args.proxy.clone(),
         certificate_path: args.certificate.clone(),
         // Diagnostic options: DNS and TLS run by default unless --skip-diagnostics
         measure_dns: !skip,

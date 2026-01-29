@@ -79,6 +79,7 @@ pub struct UiState {
     pub external_ipv4: Option<String>,
     pub external_ipv6: Option<String>,
     pub certificate_filename: Option<String>,
+    pub proxy_url: Option<String>,
     // Diagnostic results
     pub dns_summary: Option<DnsSummary>,
     pub tls_summary: Option<TlsSummary>,
@@ -150,6 +151,7 @@ impl Default for UiState {
             external_ipv4: None,
             external_ipv6: None,
             certificate_filename: None,
+            proxy_url: None,
             // Diagnostic results
             dns_summary: None,
             tls_summary: None,

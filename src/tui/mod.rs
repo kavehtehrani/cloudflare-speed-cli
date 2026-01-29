@@ -78,6 +78,7 @@ pub async fn run(args: Cli) -> Result<()> {
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
         .map(|s| s.to_string());
+    state.proxy_url = args.proxy.clone();
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
