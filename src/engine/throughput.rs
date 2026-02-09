@@ -5,6 +5,7 @@ use crate::model::{LatencySummary, Phase, RunConfig, TestEvent, ThroughputSummar
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::{stream, StreamExt};
+use reqwest::StatusCode;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
@@ -15,6 +16,7 @@ use tokio::time::Instant;
 
 /// Chunk size for upload stream generation (64 KB)
 const UPLOAD_CHUNK_SIZE: u64 = 64 * 1024;
+const MIN_DOWNLOAD_BYTES_PER_REQ: u64 = 100_000;
 
 fn throughput_summary(bytes: u64, duration: Duration, mbps_samples: &[f64]) -> ThroughputSummary {
     // Compute metrics using the same method as metrics.rs for consistency
@@ -74,24 +76,49 @@ pub async fn run_download_with_loaded_latency(
     let mut handles = Vec::new();
     for _ in 0..cfg.concurrency {
         let http = client.http.clone();
-        let mut url = client.down_url();
+        let base_url = client.down_url();
         let meas_id = client.meas_id.clone();
-        url.query_pairs_mut()
-            .append_pair("measId", &meas_id)
-            .append_pair("bytes", &cfg.download_bytes_per_req.to_string());
+        let mut bytes_per_req = cfg.download_bytes_per_req;
         let stop2 = stop.clone();
         let total2 = total.clone();
         let errors2 = errors.clone();
+        let ev_dl = event_tx.clone();
 
         handles.push(tokio::spawn(async move {
             while !stop2.load(Ordering::Relaxed) {
-                let resp = match http.get(url.clone()).send().await {
+                let mut url = base_url.clone();
+                url.query_pairs_mut()
+                    .append_pair("measId", &meas_id)
+                    .append_pair("bytes", &bytes_per_req.to_string());
+
+                let resp = match http.get(url).send().await {
                     Ok(r) => r,
                     Err(_) => {
                         errors2.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
                 };
+
+                if !resp.status().is_success() {
+                    errors2.fetch_add(1, Ordering::Relaxed);
+                    if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                        let next = (bytes_per_req / 2).max(MIN_DOWNLOAD_BYTES_PER_REQ);
+                        if next < bytes_per_req {
+                            bytes_per_req = next;
+                            let _ = ev_dl
+                                .send(TestEvent::Info {
+                                    message: format!(
+                                        "Download: 429 from server, reducing bytes per request to {}",
+                                        bytes_per_req
+                                    ),
+                                })
+                                .await;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+
                 let mut stream = resp.bytes_stream();
                 while let Some(chunk) = stream.next().await {
                     let Ok(b) = chunk else { break };

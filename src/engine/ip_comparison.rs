@@ -174,7 +174,7 @@ async fn run_download_test(
     base_url: &str,
     duration: Duration,
 ) -> Result<f64> {
-    let url = format!("{}/__down?bytes=10000000", base_url); // 10MB chunks
+    let url = format!("{}/__down?bytes=5000000", base_url); // 5MB chunks
     let start = Instant::now();
     let mut total_bytes: u64 = 0;
 

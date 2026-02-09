@@ -17,8 +17,15 @@ impl CloudflareClient {
     pub fn new(cfg: &RunConfig) -> Result<Self> {
         let base_url = Url::parse(&cfg.base_url).context("invalid base_url")?;
 
+        let mut default_headers = reqwest::header::HeaderMap::new();
+        default_headers.insert(
+            reqwest::header::REFERER,
+            "https://speed.cloudflare.com/".parse().unwrap(),
+        );
+
         let mut builder = reqwest::Client::builder()
             .user_agent(cfg.user_agent.clone())
+            .default_headers(default_headers)
             .timeout(Duration::from_secs(30))
             .tcp_keepalive(Duration::from_secs(15));
 
