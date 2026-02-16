@@ -85,12 +85,17 @@ pub async fn run_udp_like_loss_probe(
     turn: &TurnInfo,
     cfg: &RunConfig,
     event_tx: &mpsc::Sender<TestEvent>,
+    pre_resolved: Option<SocketAddr>,
 ) -> Result<ExperimentalUdpSummary> {
     let target_url = pick_stun_target(turn).context("no stun/turn url in /__turn")?;
     let (host, port) = parse_host_port(&target_url)?;
 
-    let mut addrs = tokio::net::lookup_host((host.as_str(), port)).await?;
-    let addr: SocketAddr = addrs.next().context("dns returned no addresses")?;
+    let addr: SocketAddr = if let Some(a) = pre_resolved {
+        a
+    } else {
+        let mut addrs = tokio::net::lookup_host((host.as_str(), port)).await?;
+        addrs.next().context("dns returned no addresses")?
+    };
 
     // Bind UDP socket to interface or source IP if specified
     let sock = if cfg.interface.is_some() || cfg.source_ip.is_some() {

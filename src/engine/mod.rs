@@ -327,6 +327,14 @@ impl TestEngine {
             .await
             .ok();
 
+        // Prefetch DNS for STUN server during upload to eliminate delay before packet loss phase
+        let stun_dns_handle = tokio::spawn(async move {
+            tokio::net::lookup_host(("turn.cloudflare.com", 3478_u16))
+                .await
+                .ok()
+                .and_then(|mut addrs| addrs.next())
+        });
+
         let (upload, loaded_latency_upload) = throughput::run_upload_with_loaded_latency(
             &client,
             &self.cfg,
@@ -343,33 +351,19 @@ impl TestEngine {
             .await
             .ok();
 
-        let mut turn = None;
         let mut experimental_udp = None;
         let mut udp_error = None;
 
-        event_tx
-            .send(TestEvent::Info {
-                message: "Running UDP loss probe (STUN)...".into(),
-            })
-            .await
-            .ok();
-
-        // Use /__turn if available, else fallback to Cloudflare STUN (binding requests need no credentials)
-        let stun_info = crate::model::TurnInfo {
+        let info = crate::model::TurnInfo {
             urls: vec!["stun:turn.cloudflare.com:3478".to_string()],
             username: None,
             credential: None,
         };
 
-        let info = match cloudflare::fetch_turn(&client).await {
-            Ok(i) => {
-                turn = Some(i.clone());
-                i
-            }
-            Err(_) => stun_info,
-        };
+        // Use prefetched DNS if available
+        let pre_resolved = stun_dns_handle.await.ok().flatten();
 
-        match turn_udp::run_udp_like_loss_probe(&info, &self.cfg, &event_tx).await {
+        match turn_udp::run_udp_like_loss_probe(&info, &self.cfg, &event_tx, pre_resolved).await {
             Ok(udp) => {
                 experimental_udp = Some(udp);
             }
@@ -412,7 +406,7 @@ impl TestEngine {
             upload,
             loaded_latency_download,
             loaded_latency_upload,
-            turn,
+            turn: None,
             experimental_udp,
             udp_error,
             // Network information - will be populated by TUI when available

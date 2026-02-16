@@ -1,7 +1,5 @@
-use crate::model::TurnInfo;
 use anyhow::{Context, Result};
 use reqwest::Url;
-use serde::Deserialize;
 use std::time::Duration;
 
 use crate::model::RunConfig;
@@ -140,11 +138,6 @@ impl CloudflareClient {
         self.base_url.join("/__up").expect("join __up")
     }
 
-    pub fn turn_url(&self) -> Url {
-        let mut url = self.base_url.join("/__turn").expect("join __turn");
-        url.query_pairs_mut().append_pair("measId", &self.meas_id);
-        url
-    }
 
     pub async fn probe_latency_ms(
         &self,
@@ -289,51 +282,6 @@ pub async fn fetch_meta_from_response(client: &CloudflareClient) -> Result<serde
     let resp = client.http.get(url).send().await?;
 
     Ok(client.extract_meta_from_response(&resp))
-}
-
-#[derive(Debug, Deserialize)]
-struct TurnResponse {
-    #[serde(default, rename = "iceServers")]
-    ice_servers: Vec<IceServer>,
-}
-
-#[derive(Debug, Deserialize)]
-struct IceServer {
-    #[serde(default)]
-    urls: Vec<String>,
-    username: Option<String>,
-    credential: Option<String>,
-}
-
-pub async fn fetch_turn(client: &CloudflareClient) -> Result<TurnInfo> {
-    let url = client.turn_url();
-    let tr: TurnResponse = client
-        .http
-        .get(url)
-        .send()
-        .await?
-        .json()
-        .await
-        .context("failed to parse /__turn json")?;
-
-    let mut urls = Vec::new();
-    let mut username = None;
-    let mut credential = None;
-    for s in tr.ice_servers {
-        if username.is_none() {
-            username = s.username.clone();
-        }
-        if credential.is_none() {
-            credential = s.credential.clone();
-        }
-        urls.extend(s.urls);
-    }
-
-    Ok(TurnInfo {
-        urls,
-        username,
-        credential,
-    })
 }
 
 pub async fn fetch_meta(client: &CloudflareClient) -> Result<serde_json::Value> {
