@@ -1,11 +1,12 @@
 use crate::engine::network_bind;
-use crate::model::{ExperimentalUdpSummary, RunConfig, TurnInfo};
+use crate::model::{ExperimentalUdpSummary, RunConfig, TestEvent, TurnInfo};
 use crate::stats::{latency_summary_from_samples, OnlineStats};
 use anyhow::{Context, Result};
 use rand::RngCore;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 
 // Minimal STUN binding request (RFC5389):
 // - type: 0x0001
@@ -83,6 +84,7 @@ fn parse_host_port(url: &str) -> Result<(String, u16)> {
 pub async fn run_udp_like_loss_probe(
     turn: &TurnInfo,
     cfg: &RunConfig,
+    event_tx: &mpsc::Sender<TestEvent>,
 ) -> Result<ExperimentalUdpSummary> {
     let target_url = pick_stun_target(turn).context("no stun/turn url in /__turn")?;
     let (host, port) = parse_host_port(&target_url)?;
@@ -173,9 +175,27 @@ pub async fn run_udp_like_loss_probe(
                 let ms = start.elapsed().as_secs_f64() * 1000.0;
                 samples.push(ms);
                 online.push(ms);
+                event_tx
+                    .send(TestEvent::UdpLossProgress {
+                        sent,
+                        received,
+                        total: attempts,
+                        rtt_ms: Some(ms),
+                    })
+                    .await
+                    .ok();
             }
             _ => {
                 // loss/timeout
+                event_tx
+                    .send(TestEvent::UdpLossProgress {
+                        sent,
+                        received,
+                        total: attempts,
+                        rtt_ms: None,
+                    })
+                    .await
+                    .ok();
             }
         }
 

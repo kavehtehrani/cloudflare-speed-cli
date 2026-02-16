@@ -661,6 +661,12 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
                     state.loaded_ul_latency_sent = 0;
                     state.loaded_ul_latency_received = 0;
                 }
+                Phase::PacketLoss => {
+                    state.udp_loss_sent = 0;
+                    state.udp_loss_received = 0;
+                    state.udp_loss_total = 0;
+                    state.udp_loss_latest_rtt_ms = None;
+                }
                 _ => {}
             }
         }
@@ -781,6 +787,26 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
                 }
                 _ => {}
             }
+        }
+        TestEvent::UdpLossProgress {
+            sent,
+            received,
+            total,
+            rtt_ms,
+        } => {
+            state.udp_loss_sent = sent;
+            state.udp_loss_received = received;
+            state.udp_loss_total = total;
+            state.udp_loss_latest_rtt_ms = rtt_ms;
+            let loss_pct = if sent == 0 {
+                0.0
+            } else {
+                ((sent.saturating_sub(received)) as f64) * 100.0 / sent as f64
+            };
+            state.info = format!(
+                "Packet loss probe: {}/{} (loss {:.1}%)",
+                sent, total, loss_pct
+            );
         }
         // Diagnostic events - store results and display summary in info bar
         TestEvent::DiagnosticDns { summary } => {

@@ -178,6 +178,7 @@ pub fn show_history(area: Rect, f: &mut Frame, state: &UiState) {
         Span::styled("DL        ", Style::default().fg(Color::Green)), // 10 chars
         Span::styled("UL        ", Style::default().fg(Color::Cyan)), // 10 chars
         Span::styled("Ping      ", Style::default().fg(Color::Gray)), // 10 chars
+        Span::styled("Loss     ", Style::default().fg(Color::Yellow)), // 9 chars
         Span::styled("Interface    ", Style::default().fg(Color::Blue)), // 13 chars
         Span::styled("Network", Style::default().fg(Color::Magenta)),
     ]));
@@ -316,6 +317,11 @@ pub fn show_history(area: Rect, f: &mut Frame, state: &UiState) {
             .as_deref()
             .or_else(|| r.interface_name.as_deref())
             .unwrap_or("-");
+        let history_loss_text = r
+            .experimental_udp
+            .as_ref()
+            .map(|u| format!("{:.1}%", u.latency.loss * 100.0))
+            .unwrap_or_else(|| "-".to_string());
 
         lines.push(Line::from(vec![
             Span::styled(
@@ -353,6 +359,14 @@ pub fn show_history(area: Rect, f: &mut Frame, state: &UiState) {
             Span::styled(
                 format!("{:<10.1}", r.idle_latency.median_ms.unwrap_or(f64::NAN)), // 10 chars
                 if is_selected { style } else { Style::default() },
+            ),
+            Span::styled(
+                format!("{:<9}", history_loss_text), // 9 chars
+                if is_selected {
+                    style
+                } else {
+                    Style::default().fg(Color::Yellow)
+                },
             ),
             Span::styled(
                 format!("{:<13}", interface), // 13 chars

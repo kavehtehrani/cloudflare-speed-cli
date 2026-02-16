@@ -1,6 +1,25 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+mod loss_percent_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_f64(value * 100.0)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<f64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let percent = f64::deserialize(deserializer)?;
+        Ok(percent / 100.0)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunConfig {
     pub base_url: String,
@@ -39,6 +58,7 @@ pub enum Phase {
     IdleLatency,
     Download,
     Upload,
+    PacketLoss,
     Summary,
 }
 
@@ -68,6 +88,12 @@ pub enum TestEvent {
         phase: Phase,
         bytes_total: u64,
         bps_instant: f64,
+    },
+    UdpLossProgress {
+        sent: u64,
+        received: u64,
+        total: u64,
+        rtt_ms: Option<f64>,
     },
     Info {
         message: String,
@@ -102,6 +128,7 @@ pub enum TestEvent {
 pub struct LatencySummary {
     pub sent: u64,
     pub received: u64,
+    #[serde(with = "loss_percent_serde")]
     pub loss: f64,
     pub min_ms: Option<f64>,
     pub mean_ms: Option<f64>,
@@ -183,6 +210,9 @@ pub struct RunResult {
     pub loaded_latency_upload: LatencySummary,
     pub turn: Option<TurnInfo>,
     pub experimental_udp: Option<ExperimentalUdpSummary>,
+    /// Error message when TURN fetch or UDP probe failed (for UI display)
+    #[serde(skip, default)]
+    pub udp_error: Option<String>,
     // Network information
     #[serde(default)]
     pub ip: Option<String>,

@@ -61,7 +61,7 @@ pub struct Cli {
     #[arg(long, default_value_t = 800)]
     pub probe_timeout_ms: u64,
 
-    /// Enable experimental features (TURN fetch + UDP-like loss probe)
+    /// Reserved for future experimental features
     #[arg(long)]
     pub experimental: bool,
 
@@ -340,6 +340,25 @@ async fn run_text(args: Cli) -> Result<()> {
                 }
             }
             TestEvent::Info { message } => eprintln!("{message}"),
+            TestEvent::UdpLossProgress {
+                sent,
+                received,
+                total,
+                rtt_ms,
+            } => {
+                let loss_pct = if sent == 0 {
+                    0.0
+                } else {
+                    ((sent.saturating_sub(received)) as f64) * 100.0 / sent as f64
+                };
+                let rtt_display = rtt_ms
+                    .map(|v| format!("{:.1}ms", v))
+                    .unwrap_or_else(|| "timeout".to_string());
+                eprintln!(
+                    "Packet loss probe: {}/{} recv {} loss {:.1}% ({})",
+                    sent, total, received, loss_pct, rtt_display
+                );
+            }
             TestEvent::MetaInfo { .. } => {
                 // Meta info is handled in TUI, ignore in text mode
             }

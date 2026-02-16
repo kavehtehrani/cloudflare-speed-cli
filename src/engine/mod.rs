@@ -304,15 +304,6 @@ impl TestEngine {
         )
         .await?;
 
-        if self.cfg.experimental {
-            event_tx
-                .send(TestEvent::Info {
-                    message: "Fetching TURN info (experimental)".into(),
-                })
-                .await
-                .ok();
-        }
-
         event_tx
             .send(TestEvent::PhaseStarted {
                 phase: Phase::Download,
@@ -347,21 +338,57 @@ impl TestEngine {
 
         event_tx
             .send(TestEvent::PhaseStarted {
-                phase: Phase::Summary,
+                phase: Phase::PacketLoss,
             })
             .await
             .ok();
 
         let mut turn = None;
         let mut experimental_udp = None;
-        if self.cfg.experimental {
-            if let Ok(info) = cloudflare::fetch_turn(&client).await {
-                experimental_udp = turn_udp::run_udp_like_loss_probe(&info, &self.cfg)
+        let mut udp_error = None;
+
+        event_tx
+            .send(TestEvent::Info {
+                message: "Running UDP loss probe (STUN)...".into(),
+            })
+            .await
+            .ok();
+
+        // Use /__turn if available, else fallback to Cloudflare STUN (binding requests need no credentials)
+        let stun_info = crate::model::TurnInfo {
+            urls: vec!["stun:turn.cloudflare.com:3478".to_string()],
+            username: None,
+            credential: None,
+        };
+
+        let info = match cloudflare::fetch_turn(&client).await {
+            Ok(i) => {
+                turn = Some(i.clone());
+                i
+            }
+            Err(_) => stun_info,
+        };
+
+        match turn_udp::run_udp_like_loss_probe(&info, &self.cfg, &event_tx).await {
+            Ok(udp) => {
+                experimental_udp = Some(udp);
+            }
+            Err(e) => {
+                let msg = format!("UDP probe failed: {e:#}");
+                udp_error = Some(msg.clone());
+                event_tx
+                    .send(TestEvent::Info { message: msg })
                     .await
                     .ok();
-                turn = Some(info);
             }
         }
+
+        event_tx
+            .send(TestEvent::PhaseStarted {
+                phase: Phase::Summary,
+            })
+            .await
+            .ok();
 
         // Abort the control listener task before returning.
         // In Tokio, dropping a JoinHandle does NOT cancel the task - it continues running!
@@ -387,6 +414,7 @@ impl TestEngine {
             loaded_latency_upload,
             turn,
             experimental_udp,
+            udp_error,
             // Network information - will be populated by TUI when available
             ip: None,
             colo: None,

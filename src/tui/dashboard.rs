@@ -16,6 +16,26 @@ pub fn max_y(points: &[(f64, f64)]) -> f64 {
     points.iter().map(|(_, y)| *y).fold(0.0, |a, b| a.max(b))
 }
 
+fn udp_split_bar(sent: u64, received: u64, width: usize) -> Line<'static> {
+    let safe_sent = sent.max(1);
+    let safe_received = received.min(safe_sent);
+    let lost = safe_sent.saturating_sub(safe_received);
+    let ok_units = ((safe_received as f64 / safe_sent as f64) * width as f64).round() as usize;
+    let lost_units = width.saturating_sub(ok_units);
+
+    let ok_part = "=".repeat(ok_units);
+    let lost_part = "x".repeat(lost_units);
+
+    Line::from(vec![
+        Span::styled("UDP split: ", Style::default().fg(Color::Gray)),
+        Span::raw("["),
+        Span::styled(ok_part, Style::default().fg(Color::Green)),
+        Span::styled(lost_part, Style::default().fg(Color::Red)),
+        Span::raw("] "),
+        Span::styled(format!("ok {} lost {}", safe_received, lost), Style::default().fg(Color::Gray)),
+    ])
+}
+
 pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
     // Small terminal: keep the compact dashboard (gauges + sparklines).
     // Large terminal: show full charts (like the website) alongside the live cards.
@@ -29,6 +49,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             [
                 Constraint::Length(13), // Throughput charts row with metrics (side-by-side)
                 Constraint::Length(10), // Latency box plots with metrics below (idle + loaded DL + loaded UL)
+                Constraint::Length(3),  // Packet loss (UDP) row
                 Constraint::Min(0),     // Network Information + Keyboard Shortcuts (side-by-side)
                 Constraint::Length(5),  // Status row (full width at bottom)
             ]
@@ -170,7 +191,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
         f.render_widget(empty_chart, thr_row[1]);
     }
 
-    // Latency box plots: Idle, Loaded DL, Loaded UL (with metrics inside each box)
+    // Latency box plots: Idle, Loaded DL, Loaded UL
     let lat_row = Layout::default()
         .direction(Direction::Horizontal)
         .constraints(
@@ -198,6 +219,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             title,
             None,
             jitter,
+            None,
         );
     } else {
         let empty = Paragraph::new("Waiting for data...")
@@ -227,6 +249,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             title,
             Some(Color::Green),
             jitter,
+            None,
         );
     } else {
         let empty = Paragraph::new("Waiting for data...").block(
@@ -256,6 +279,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             title,
             Some(Color::Cyan),
             jitter,
+            None,
         );
     } else {
         let empty = Paragraph::new("Waiting for data...").block(
@@ -266,11 +290,122 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
         f.render_widget(empty, lat_row[2]);
     }
 
+    // Packet loss row (full width) with live progress during measurement
+    let (udp_sent, udp_received, udp_total, udp_latest_rtt) = if state.udp_loss_total > 0 {
+        (
+            state.udp_loss_sent,
+            state.udp_loss_received,
+            state.udp_loss_total,
+            state.udp_loss_latest_rtt_ms,
+        )
+    } else if let Some(ref exp) = state
+        .last_result
+        .as_ref()
+        .and_then(|r| r.experimental_udp.as_ref())
+    {
+        (
+            exp.latency.sent,
+            exp.latency.received,
+            exp.latency.sent,
+            exp.latency.median_ms,
+        )
+    } else {
+        (0, 0, 0, None)
+    };
+    let udp_loss_pct = if udp_sent == 0 {
+        0.0
+    } else {
+        ((udp_sent.saturating_sub(udp_received)) as f64) * 100.0 / udp_sent as f64
+    };
+    let udp_status = if state.phase == crate::model::Phase::PacketLoss {
+        "running"
+    } else if udp_sent > 0 {
+        "complete"
+    } else {
+        "waiting"
+    };
+    let udp_block = Block::default()
+        .borders(Borders::ALL)
+        .title("Packet Loss (UDP/TURN)");
+    let udp_inner = udp_block.inner(main[2]);
+    f.render_widget(udp_block, main[2]);
+
+    if let Some(ref err) = state
+        .last_result
+        .as_ref()
+        .and_then(|r| r.udp_error.as_ref())
+    {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Packet loss probe failed: ", Style::default().fg(Color::Gray)),
+                Span::styled(err.as_str(), Style::default().fg(Color::Yellow)),
+            ])),
+            udp_inner,
+        );
+    } else if udp_total > 0 || udp_sent > 0 {
+        let safe_total = udp_total.max(udp_sent).max(1);
+        let safe_received = udp_received.min(udp_sent);
+        let lost = udp_sent.saturating_sub(safe_received);
+        let pending = safe_total.saturating_sub(udp_sent);
+
+        let bar_width = udp_inner.width.saturating_sub(50) as usize;
+        let bar_width = bar_width.max(10);
+
+        let recv_units = ((safe_received as f64 / safe_total as f64) * bar_width as f64).round() as usize;
+        let lost_units = ((lost as f64 / safe_total as f64) * bar_width as f64).round() as usize;
+        let pending_units = bar_width.saturating_sub(recv_units + lost_units);
+
+        let bar_recv = "█".repeat(recv_units);
+        let bar_lost = "█".repeat(lost_units);
+        let bar_pending = "░".repeat(pending_units);
+
+        let rtt_str = udp_latest_rtt
+            .map(|v| format!("{:.0}ms", v))
+            .unwrap_or_else(|| "-".to_string());
+
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(udp_status, Style::default().fg(Color::Yellow)),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{}/{}", udp_sent, safe_total),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("loss {:.1}%", udp_loss_pct),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::raw(" "),
+                Span::styled(format!("rtt {}", rtt_str), Style::default().fg(Color::Gray)),
+                Span::raw("  "),
+                Span::styled(bar_recv, Style::default().fg(Color::Green)),
+                Span::styled(bar_lost, Style::default().fg(Color::Red)),
+                Span::styled(bar_pending, Style::default().fg(Color::DarkGray)),
+                Span::raw("  "),
+                Span::styled(format!("ok {}", safe_received), Style::default().fg(Color::Green)),
+                Span::raw(" "),
+                Span::styled(format!("lost {}", lost), Style::default().fg(Color::Red)),
+                if pending > 0 {
+                    Span::styled(format!(" pending {}", pending), Style::default().fg(Color::DarkGray))
+                } else {
+                    Span::raw("")
+                },
+            ])),
+            udp_inner,
+        );
+    } else {
+        f.render_widget(
+            Paragraph::new("Packet loss probe starts after upload phase..."),
+            udp_inner,
+        );
+    }
+
     // Network Information and Keyboard Shortcuts side-by-side
     let info_row = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
-        .split(main[2]);
+        .split(main[3]);
 
     // Network Information panel (left)
 
@@ -508,7 +643,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
 
     // Custom comments (wrapping to fit status area)
     if let Some(comments) = state.comments.as_deref() {
-        push_wrapped_status_kv(&mut status_lines, "Comments", comments, main[3].width);
+        push_wrapped_status_kv(&mut status_lines, "Comments", comments, main[4].width);
     }
 
     // Info line - split into two lines if it contains a saved path, with wrapping
@@ -521,7 +656,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
 
             // Wrap the path to fit within available width
             // Account for borders (2 chars on each side)
-            let status_area_width = main[3].width.saturating_sub(4);
+            let status_area_width = main[4].width.saturating_sub(4);
             let label_width = label_text.chars().count() as u16;
             let path_chars: Vec<char> = path_str.chars().collect();
             let mut remaining = path_chars.as_slice();
@@ -571,7 +706,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
 
     let status =
         Paragraph::new(status_lines).block(Block::default().borders(Borders::ALL).title("Status"));
-    f.render_widget(status, main[3]);
+    f.render_widget(status, main[4]);
 }
 
 pub fn draw_dashboard_compact(area: Rect, f: &mut Frame, state: &UiState) {
@@ -675,10 +810,6 @@ pub fn draw_dashboard_compact(area: Rect, f: &mut Frame, state: &UiState) {
                 Span::styled("Jitter: ", Style::default().fg(Color::Gray)),
                 Span::raw(format!("{:.0} ms", lat.jitter_ms.unwrap_or(f64::NAN))),
             ]),
-            Line::from(vec![
-                Span::styled("Loss: ", Style::default().fg(Color::Gray)),
-                Span::raw(format!("{:.0}%", lat.loss * 100.0)),
-            ]),
         ]
     };
     let idle_stats = Paragraph::new(
@@ -768,6 +899,17 @@ pub fn draw_dashboard_compact(area: Rect, f: &mut Frame, state: &UiState) {
             Span::styled("Diag: ", Style::default().fg(Color::Gray)),
             Span::raw(diag_parts.join(" | ")),
         ]));
+    }
+    if let Some(ref exp) = state
+        .last_result
+        .as_ref()
+        .and_then(|r| r.experimental_udp.as_ref())
+    {
+        meta_lines.push(Line::from(vec![
+            Span::styled("UDP loss (TURN): ", Style::default().fg(Color::Gray)),
+            Span::styled(format!("{:.1}%", exp.latency.loss * 100.0), Style::default().fg(Color::Yellow)),
+        ]));
+        meta_lines.push(udp_split_bar(exp.latency.sent, exp.latency.received, 12));
     }
 
     meta_lines.extend(vec![

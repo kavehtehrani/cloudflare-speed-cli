@@ -141,7 +141,9 @@ impl CloudflareClient {
     }
 
     pub fn turn_url(&self) -> Url {
-        self.base_url.join("/__turn").expect("join __turn")
+        let mut url = self.base_url.join("/__turn").expect("join __turn");
+        url.query_pairs_mut().append_pair("measId", &self.meas_id);
+        url
     }
 
     pub async fn probe_latency_ms(
