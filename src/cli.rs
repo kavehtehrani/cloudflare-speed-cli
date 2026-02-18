@@ -507,11 +507,16 @@ async fn run_text(args: Cli) -> Result<()> {
         enriched.loaded_latency_upload.jitter_ms.unwrap_or(f64::NAN)
     );
     if let Some(ref exp) = enriched.experimental_udp {
+        let mos_str = exp.mos.map(|m| format!("MOS {:.1}", m)).unwrap_or_else(|| "N/A".to_string());
+        let jitter_str = exp.latency.jitter_ms.map(|j| format!("{:.1}ms", j)).unwrap_or_else(|| "-".to_string());
         println!(
-            "Experimental UDP-like loss probe: loss {:.1}% med {} ms (target {:?})",
+            "UDP quality: {} ({}) | loss {:.1}% jitter {} reorder {:.1}% rtt {}ms",
+            exp.quality_label,
+            mos_str,
             exp.latency.loss * 100.0,
-            exp.latency.median_ms.unwrap_or(f64::NAN),
-            exp.target
+            jitter_str,
+            exp.out_of_order_pct,
+            exp.latency.median_ms.unwrap_or(f64::NAN)
         );
     }
     if args.auto_save {

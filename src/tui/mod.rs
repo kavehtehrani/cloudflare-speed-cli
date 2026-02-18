@@ -259,6 +259,11 @@ pub async fn run(args: Cli) -> Result<()> {
                                 state.loaded_ul_latency_received = 0;
                                 state.phase = Phase::IdleLatency;
                                 state.paused = false;
+                                // Clear UDP loss counters
+                                state.udp_loss_sent = 0;
+                                state.udp_loss_received = 0;
+                                state.udp_loss_total = 0;
+                                state.udp_loss_latest_rtt_ms = None;
                                 // Clear diagnostic results
                                 state.dns_summary = None;
                                 state.tls_summary = None;

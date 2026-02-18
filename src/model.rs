@@ -188,6 +188,18 @@ pub struct TurnInfo {
 pub struct ExperimentalUdpSummary {
     pub target: Option<String>,
     pub latency: LatencySummary,
+    /// Count of out-of-order packets received
+    #[serde(default)]
+    pub out_of_order: u64,
+    /// Percentage of packets received out of order
+    #[serde(default)]
+    pub out_of_order_pct: f64,
+    /// Mean Opinion Score (1.0-5.0) for voice quality estimate
+    #[serde(default)]
+    pub mos: Option<f64>,
+    /// Quality label based on packet loss: Excellent/Good/Acceptable/Poor/Bad
+    #[serde(default)]
+    pub quality_label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

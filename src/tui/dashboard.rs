@@ -36,6 +36,17 @@ fn udp_split_bar(sent: u64, received: u64, width: usize) -> Line<'static> {
     ])
 }
 
+/// Get color for quality label based on loss severity
+fn quality_label_color(label: &str) -> Color {
+    match label {
+        "Excellent" | "Good" => Color::Green,
+        "Acceptable" => Color::Yellow,
+        "Poor" => Color::Magenta,
+        "Bad" => Color::Red,
+        _ => Color::Gray,
+    }
+}
+
 pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
     // Small terminal: keep the compact dashboard (gauges + sparklines).
     // Large terminal: show full charts (like the website) alongside the live cards.
@@ -298,7 +309,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             state.udp_loss_total,
             state.udp_loss_latest_rtt_ms,
         )
-    } else if let Some(ref exp) = state
+    } else if let Some(exp) = state
         .last_result
         .as_ref()
         .and_then(|r| r.experimental_udp.as_ref())
@@ -330,7 +341,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
     let udp_inner = udp_block.inner(main[2]);
     f.render_widget(udp_block, main[2]);
 
-    if let Some(ref err) = state
+    if let Some(err) = state
         .last_result
         .as_ref()
         .and_then(|r| r.udp_error.as_ref())
@@ -348,7 +359,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
         let lost = udp_sent.saturating_sub(safe_received);
         let pending = safe_total.saturating_sub(udp_sent);
 
-        let bar_width = udp_inner.width.saturating_sub(50) as usize;
+        let bar_width = udp_inner.width.saturating_sub(70) as usize;
         let bar_width = bar_width.max(10);
 
         let recv_units = ((safe_received as f64 / safe_total as f64) * bar_width as f64).round() as usize;
@@ -363,35 +374,74 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             .map(|v| format!("{:.0}ms", v))
             .unwrap_or_else(|| "-".to_string());
 
+        // Get quality label, MOS, jitter, and reorder info from completed result
+        let (quality_label, mos_str, jitter_str, reorder_str) = state
+            .last_result
+            .as_ref()
+            .and_then(|r| r.experimental_udp.as_ref())
+            .map(|exp| {
+                let label = exp.quality_label.as_str();
+                let mos = exp.mos.map(|m| format!("MOS {:.1}", m)).unwrap_or_default();
+                let jitter = exp.latency.jitter_ms.map(|j| format!("jitter {:.1}ms", j)).unwrap_or_default();
+                let reorder = format!("reorder {:.1}%", exp.out_of_order_pct);
+                (label, mos, jitter, reorder)
+            })
+            .unwrap_or(("", String::new(), String::new(), String::new()));
+
+        let mut spans = vec![
+            Span::styled(udp_status, Style::default().fg(Color::Yellow)),
+            Span::raw(" "),
+        ];
+
+        // Show quality label and MOS when test is complete
+        if !quality_label.is_empty() {
+            let label_color = quality_label_color(quality_label);
+            spans.push(Span::styled(quality_label, Style::default().fg(label_color)));
+            if !mos_str.is_empty() {
+                spans.push(Span::raw(" ("));
+                spans.push(Span::styled(mos_str, Style::default().fg(label_color)));
+                spans.push(Span::raw(") "));
+            } else {
+                spans.push(Span::raw(" "));
+            }
+        }
+
+        spans.extend(vec![
+            Span::styled(
+                format!("loss {:.1}%", udp_loss_pct),
+                Style::default().fg(if udp_loss_pct == 0.0 { Color::Green } else if udp_loss_pct < 2.5 { Color::Yellow } else { Color::Red }),
+            ),
+            Span::raw(" "),
+            Span::styled(format!("rtt {}", rtt_str), Style::default().fg(Color::Gray)),
+        ]);
+
+        // Add jitter and reorder when available
+        if !jitter_str.is_empty() {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(jitter_str, Style::default().fg(Color::Gray)));
+        }
+        if !reorder_str.is_empty() && state.phase != crate::model::Phase::PacketLoss {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(reorder_str, Style::default().fg(Color::Gray)));
+        }
+
+        spans.extend(vec![
+            Span::raw("  "),
+            Span::styled(bar_recv, Style::default().fg(Color::Green)),
+            Span::styled(bar_lost, Style::default().fg(Color::Red)),
+            Span::styled(bar_pending, Style::default().fg(Color::DarkGray)),
+            Span::raw("  "),
+            Span::styled(format!("ok {}", safe_received), Style::default().fg(Color::Green)),
+            Span::raw(" "),
+            Span::styled(format!("lost {}", lost), Style::default().fg(Color::Red)),
+        ]);
+
+        if pending > 0 {
+            spans.push(Span::styled(format!(" pending {}", pending), Style::default().fg(Color::DarkGray)));
+        }
+
         f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(udp_status, Style::default().fg(Color::Yellow)),
-                Span::raw(" "),
-                Span::styled(
-                    format!("{}/{}", udp_sent, safe_total),
-                    Style::default().fg(Color::Gray),
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    format!("loss {:.1}%", udp_loss_pct),
-                    Style::default().fg(Color::Yellow),
-                ),
-                Span::raw(" "),
-                Span::styled(format!("rtt {}", rtt_str), Style::default().fg(Color::Gray)),
-                Span::raw("  "),
-                Span::styled(bar_recv, Style::default().fg(Color::Green)),
-                Span::styled(bar_lost, Style::default().fg(Color::Red)),
-                Span::styled(bar_pending, Style::default().fg(Color::DarkGray)),
-                Span::raw("  "),
-                Span::styled(format!("ok {}", safe_received), Style::default().fg(Color::Green)),
-                Span::raw(" "),
-                Span::styled(format!("lost {}", lost), Style::default().fg(Color::Red)),
-                if pending > 0 {
-                    Span::styled(format!(" pending {}", pending), Style::default().fg(Color::DarkGray))
-                } else {
-                    Span::raw("")
-                },
-            ])),
+            Paragraph::new(Line::from(spans)),
             udp_inner,
         );
     } else {
@@ -900,14 +950,19 @@ pub fn draw_dashboard_compact(area: Rect, f: &mut Frame, state: &UiState) {
             Span::raw(diag_parts.join(" | ")),
         ]));
     }
-    if let Some(ref exp) = state
+    if let Some(exp) = state
         .last_result
         .as_ref()
         .and_then(|r| r.experimental_udp.as_ref())
     {
+        let label_color = quality_label_color(&exp.quality_label);
+        let mos_str = exp.mos.map(|m| format!(" MOS {:.1}", m)).unwrap_or_default();
         meta_lines.push(Line::from(vec![
-            Span::styled("UDP loss (TURN): ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("{:.1}%", exp.latency.loss * 100.0), Style::default().fg(Color::Yellow)),
+            Span::styled("UDP: ", Style::default().fg(Color::Gray)),
+            Span::styled(&exp.quality_label, Style::default().fg(label_color)),
+            Span::styled(mos_str, Style::default().fg(label_color)),
+            Span::styled(format!(" loss {:.1}%", exp.latency.loss * 100.0), Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" reorder {:.1}%", exp.out_of_order_pct), Style::default().fg(Color::Gray)),
         ]));
         meta_lines.push(udp_split_bar(exp.latency.sent, exp.latency.received, 12));
     }
