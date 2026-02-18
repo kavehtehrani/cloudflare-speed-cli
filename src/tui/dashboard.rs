@@ -20,7 +20,8 @@ fn udp_split_bar(sent: u64, received: u64, width: usize) -> Line<'static> {
     let safe_sent = sent.max(1);
     let safe_received = received.min(safe_sent);
     let lost = safe_sent.saturating_sub(safe_received);
-    let ok_units = ((safe_received as f64 / safe_sent as f64) * width as f64).round() as usize;
+    // Use floor for ok_units so any loss shows at least one red segment
+    let ok_units = ((safe_received as f64 / safe_sent as f64) * width as f64).floor() as usize;
     let lost_units = width.saturating_sub(ok_units);
 
     let ok_part = "=".repeat(ok_units);
@@ -362,8 +363,13 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
         let bar_width = udp_inner.width.saturating_sub(70) as usize;
         let bar_width = bar_width.max(10);
 
-        let recv_units = ((safe_received as f64 / safe_total as f64) * bar_width as f64).round() as usize;
-        let lost_units = ((lost as f64 / safe_total as f64) * bar_width as f64).round() as usize;
+        // Ensure any loss shows at least one red segment
+        let lost_units = if lost > 0 {
+            ((lost as f64 / safe_total as f64) * bar_width as f64).ceil() as usize
+        } else {
+            0
+        };
+        let recv_units = ((safe_received as f64 / safe_total as f64) * bar_width as f64).floor() as usize;
         let pending_units = bar_width.saturating_sub(recv_units + lost_units);
 
         let bar_recv = "█".repeat(recv_units);

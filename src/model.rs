@@ -51,6 +51,7 @@ pub struct RunConfig {
     pub traceroute_max_hops: u8,
     pub ipv4_only: bool,
     pub ipv6_only: bool,
+    pub udp_packets: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

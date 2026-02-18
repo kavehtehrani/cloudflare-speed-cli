@@ -124,6 +124,10 @@ pub struct Cli {
     /// Skip default diagnostic measurements (DNS, TLS)
     #[arg(long)]
     pub skip_diagnostics: bool,
+
+    /// Number of UDP packets to send for packet loss measurement
+    #[arg(long, default_value_t = 50)]
+    pub udp_packets: u64,
 }
 
 pub async fn run(args: Cli) -> Result<()> {
@@ -203,6 +207,7 @@ pub fn build_config(args: &Cli) -> RunConfig {
         traceroute_max_hops: args.traceroute_max_hops,
         ipv4_only: args.ipv4_only,
         ipv6_only: args.ipv6_only,
+        udp_packets: args.udp_packets,
     }
 }
 

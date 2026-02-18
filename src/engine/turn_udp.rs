@@ -213,7 +213,7 @@ pub async fn run_udp_like_loss_probe(
 
     let timeout = Duration::from_millis(600);
     let interval = Duration::from_millis(80);
-    let attempts = 50u64;
+    let attempts = cfg.udp_packets;
 
     let mut sent = 0u64;
     let mut received = 0u64;
