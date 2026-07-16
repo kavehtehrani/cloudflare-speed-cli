@@ -3,6 +3,9 @@
 
 use std::time::Duration;
 
+/// Timeout for non-critical startup requests (/meta, /locations, /cdn-cgi/trace).
+pub const META_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Per-connection TCP connect timeout for the speed-test HTTP client. Kept
 /// short so that when a family is pinned via `--ipv4-only` / `--ipv6-only` and
 /// that family has no working route, connects fail fast instead of stalling on

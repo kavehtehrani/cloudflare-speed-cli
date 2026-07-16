@@ -59,8 +59,8 @@ const MENU_FOOTER_LINE_2: &str = "Esc: close";
 /// depending on whether the selected run already has a comment.
 pub fn menu_labels(state: &UiState) -> [&'static str; MENU_ITEM_COUNT] {
     let has_comment = state
-        .history
-        .get(state.history_selected)
+        .history.runs
+        .get(state.history.selected)
         .and_then(|r| r.comments.as_deref())
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
@@ -82,12 +82,12 @@ pub fn show_history(area: Rect, f: &mut Frame, state: &mut UiState) {
     let mut lines: Vec<Line> = Vec::new();
 
     // Filter history based on filter text (case-insensitive search in network_name, interface_name, as_org, colo)
-    let filter_lower = state.history_filter.to_lowercase();
-    let filtered_history: Vec<&RunResult> = if state.history_filter.is_empty() {
-        state.history.iter().collect()
+    let filter_lower = state.history.filter.to_lowercase();
+    let filtered_history: Vec<&RunResult> = if state.history.filter.is_empty() {
+        state.history.runs.iter().collect()
     } else {
         state
-            .history
+            .history.runs
             .iter()
             .filter(|r| {
                 let matches_field = |opt: &Option<String>| {
@@ -111,16 +111,16 @@ pub fn show_history(area: Rect, f: &mut Frame, state: &mut UiState) {
     // Show total count and current position
     let total_count = filtered_history.len();
     let current_pos = if total_count > 0 {
-        state.history_selected.min(total_count.saturating_sub(1)) + 1
+        state.history.selected.min(total_count.saturating_sub(1)) + 1
     } else {
         0
     };
 
     // Build header line with controls
     let mut header_spans = vec![Span::raw(format!("History ({}/{}", current_pos, total_count))];
-    if !state.history_filter.is_empty() {
+    if !state.history.filter.is_empty() {
         header_spans.push(Span::styled(
-            format!(" filtered from {}", state.history.len()),
+            format!(" filtered from {}", state.history.runs.len()),
             Style::default().fg(Color::Yellow),
         ));
     }
@@ -145,20 +145,20 @@ pub fn show_history(area: Rect, f: &mut Frame, state: &mut UiState) {
     lines.push(Line::from(header_spans));
 
     // Show filter input or current filter
-    if state.history_filter_editing {
+    if state.history.filter_editing {
         lines.push(Line::from(vec![
             Span::styled("Filter: ", Style::default().fg(Color::Cyan)),
-            Span::styled(&state.history_filter, Style::default().fg(Color::White)),
+            Span::styled(&state.history.filter, Style::default().fg(Color::White)),
             Span::styled("_", Style::default().fg(Color::White)), // cursor
             Span::styled(
                 "  (Enter to apply, Esc to cancel)",
                 Style::default().fg(Color::Gray),
             ),
         ]));
-    } else if !state.history_filter.is_empty() {
+    } else if !state.history.filter.is_empty() {
         lines.push(Line::from(vec![
             Span::styled("Filter: ", Style::default().fg(Color::Cyan)),
-            Span::styled(&state.history_filter, Style::default().fg(Color::Yellow)),
+            Span::styled(&state.history.filter, Style::default().fg(Color::Yellow)),
             Span::styled("  (Esc to clear)", Style::default().fg(Color::Gray)),
         ]));
     }
@@ -263,20 +263,22 @@ pub fn show_history(area: Rect, f: &mut Frame, state: &mut UiState) {
 
     // Clamp selection to filtered history bounds
     let effective_selected = state
-        .history_selected
+        .history
+        .selected
         .min(filtered_history.len().saturating_sub(1));
 
     // Auto-adjust scroll to keep selected item visible
     // Only scroll when selection goes off-screen (not before)
     let mut offset = state
-        .history_scroll_offset
+        .history
+        .scroll_offset
         .min(filtered_history.len().saturating_sub(1));
     if effective_selected < offset {
         offset = effective_selected;
     } else if max_items > 0 && effective_selected >= offset + max_items {
         offset = effective_selected - max_items + 1;
     }
-    state.history_scroll_offset = offset;
+    state.history.scroll_offset = offset;
     let scroll_offset = offset;
 
     let history_display: Vec<_> = filtered_history
@@ -504,15 +506,15 @@ pub fn show_history(area: Rect, f: &mut Frame, state: &mut UiState) {
         ]));
     }
 
-    if state.history.is_empty() {
+    if state.history.runs.is_empty() {
         lines.push(Line::from("No history available."));
-    } else if filtered_history.is_empty() && !state.history_filter.is_empty() {
+    } else if filtered_history.is_empty() && !state.history.filter.is_empty() {
         lines.push(Line::from(vec![
             Span::styled(
                 "No results match filter: ",
                 Style::default().fg(Color::Yellow),
             ),
-            Span::styled(&state.history_filter, Style::default().fg(Color::White)),
+            Span::styled(&state.history.filter, Style::default().fg(Color::White)),
         ]));
     }
 
@@ -540,12 +542,12 @@ pub fn draw_history_detail(area: Rect, f: &mut Frame, state: &mut UiState) {
     // Header with run identity and navigation help
     let mut header_lines: Vec<Line> = Vec::new();
 
-    let filter_lower = state.history_filter.to_lowercase();
-    let filtered_history: Vec<&RunResult> = if state.history_filter.is_empty() {
-        state.history.iter().collect()
+    let filter_lower = state.history.filter.to_lowercase();
+    let filtered_history: Vec<&RunResult> = if state.history.filter.is_empty() {
+        state.history.runs.iter().collect()
     } else {
         state
-            .history
+            .history.runs
             .iter()
             .filter(|r| {
                 let matches_field = |opt: &Option<String>| {
@@ -562,7 +564,8 @@ pub fn draw_history_detail(area: Rect, f: &mut Frame, state: &mut UiState) {
             .collect()
     };
     let effective_selected = state
-        .history_selected
+        .history
+        .selected
         .min(filtered_history.len().saturating_sub(1));
 
     header_lines.push(Line::from(vec![
@@ -594,24 +597,24 @@ pub fn draw_history_detail(area: Rect, f: &mut Frame, state: &mut UiState) {
     }
 
     // Search status line: shows current pattern (or input cursor while editing)
-    if state.history_detail_search_editing {
+    if state.history.detail_search_editing {
         let mut spans = vec![
             Span::styled("Search: ", Style::default().fg(Color::Cyan)),
-            Span::styled(&state.history_detail_search, Style::default().fg(Color::White)),
+            Span::styled(&state.history.detail_search, Style::default().fg(Color::White)),
             Span::styled("_", Style::default().fg(Color::Yellow)),
             Span::styled("  (Enter to confirm, Esc to cancel)", Style::default().fg(Color::Gray)),
         ];
-        if let Some(ref err) = state.history_detail_search_error {
+        if let Some(ref err) = state.history.detail_search_error {
             spans.push(Span::styled(
                 format!("  [regex error: {}]", err),
                 Style::default().fg(Color::Red),
             ));
         }
         header_lines.push(Line::from(spans));
-    } else if !state.history_detail_search.is_empty() {
+    } else if !state.history.detail_search.is_empty() {
         header_lines.push(Line::from(vec![
             Span::styled("Search: ", Style::default().fg(Color::Cyan)),
-            Span::styled(&state.history_detail_search, Style::default().fg(Color::Yellow)),
+            Span::styled(&state.history.detail_search, Style::default().fg(Color::Yellow)),
             Span::styled("  (Esc to clear)", Style::default().fg(Color::Gray)),
         ]));
     }
@@ -643,7 +646,7 @@ pub fn draw_history_detail(area: Rect, f: &mut Frame, state: &mut UiState) {
         height: inner_area.height.saturating_sub(header_area.height),
     };
     if body_area.height > 0 {
-        f.render_widget(&state.history_detail_textarea, body_area);
+        f.render_widget(&state.history.detail_textarea, body_area);
     }
 }
 
@@ -670,7 +673,7 @@ pub fn draw_history_menu(area: Rect, f: &mut Frame, state: &UiState) {
     let mut lines: Vec<Line> = Vec::with_capacity(labels.len() + 3);
 
     for (idx, label) in labels.iter().enumerate() {
-        let is_selected = state.history_menu_selected == idx;
+        let is_selected = state.history.menu_selected == idx;
 
         let marker = if is_selected { "> " } else { "  " };
         let style = if is_selected {
@@ -752,7 +755,7 @@ pub fn draw_history_comment_modal(area: Rect, f: &mut Frame, state: &UiState) {
         height: inner_area.height.saturating_sub(editor_height),
     };
 
-    f.render_widget(&state.history_comment_modal_textarea, editor_area);
+    f.render_widget(&state.history.comment_modal_textarea, editor_area);
 
     let hint = Paragraph::new(Line::from(vec![Span::styled(
         COMMENT_MODAL_HINT,
@@ -814,7 +817,7 @@ fn wrap_path(path: &str, width: u16) -> Vec<String> {
 }
 
 pub fn draw_history_export_modal(area: Rect, f: &mut Frame, state: &UiState) {
-    let Some(ref path) = state.history_export_modal_path else {
+    let Some(ref path) = state.history.export_modal_path else {
         return;
     };
 
@@ -851,12 +854,12 @@ pub fn draw_history_export_modal(area: Rect, f: &mut Frame, state: &UiState) {
         )]));
     }
     lines.push(Line::from(""));
-    let hint = if state.history_export_modal_copied {
+    let hint = if state.history.export_modal_copied {
         EXPORT_MODAL_HINT_COPIED
     } else {
         EXPORT_MODAL_HINT_COPY
     };
-    let hint_color = if state.history_export_modal_copied {
+    let hint_color = if state.history.export_modal_copied {
         Color::Green
     } else {
         Color::Gray

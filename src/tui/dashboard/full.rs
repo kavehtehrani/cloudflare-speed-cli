@@ -6,231 +6,19 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Axis, Block, Borders, Dataset, GraphType, Paragraph, Scrollbar, ScrollbarOrientation,
-        ScrollbarState, Sparkline,
+        ScrollbarState,
     },
     Frame,
 };
 
-use super::charts;
-use super::log_style;
-use super::state::{push_wrapped_status_kv, UiState, REDACTED_PLACEHOLDER};
-use std::borrow::Cow;
+use super::super::charts;
+use super::super::log_style;
+use super::super::state::{push_wrapped_status_kv, UiState, REDACTED_PLACEHOLDER};
+use super::{
+    external_ip_for_family, max_y, quality_label_color, redact_log_line, show_or_redact,
+};
 
-/// Returns `REDACTED_PLACEHOLDER` when `hide` is true, otherwise `value` or `"-"` for `None`.
-/// Used to conceal identifying network info (IP, MAC, SSID, ISP, location) for
-/// screenshot/demo sharing without altering stored history.
-fn show_or_redact<'a>(value: Option<&'a str>, hide: bool) -> &'a str {
-    if hide {
-        REDACTED_PLACEHOLDER
-    } else {
-        value.unwrap_or("-")
-    }
-}
-
-/// Display value for an "External IPv4"/"External IPv6" panel row: the probe
-/// result when available, otherwise the meta client IP. The fallback must stay
-/// family-checked — a `-4`/`-6` run skips the other family's probe, and the
-/// client IP would otherwise show up on the wrong row.
-fn external_ip_for_family<'a>(
-    external: Option<&'a str>,
-    meta_ip: Option<&'a str>,
-    want_ipv4: bool,
-) -> Option<&'a str> {
-    external.or_else(|| {
-        meta_ip.filter(|ip| {
-            ip.parse::<std::net::IpAddr>()
-                .map(|addr| addr.is_ipv4() == want_ipv4)
-                .unwrap_or(false)
-        })
-    })
-}
-
-/// Redacts identifying info from a single Test Activity log line.
-///
-/// Strategy: substring-replace values the engine already populated into `state`
-/// (covers IP/ASN/ISP/server/colo/network/interface). Then pattern-replace any
-/// remaining IPv4 dotted-quads (covers traceroute hops and IP-comparison IPs
-/// that aren't in `state`). Cheap no-op when redaction is off — returns the
-/// borrowed input without allocating.
-fn redact_log_line<'a>(line: &'a str, state: &UiState) -> Cow<'a, str> {
-    if !state.hide_network_info {
-        return Cow::Borrowed(line);
-    }
-
-    let mut needles: Vec<&str> = [
-        state.external_ipv6.as_deref(),
-        state.external_ipv4.as_deref(),
-        state.ip.as_deref(),
-        state.interface_mac.as_deref(),
-        state.as_org.as_deref(),
-        state.network_name.as_deref(),
-        state.interface_name.as_deref(),
-        state.server.as_deref(),
-        state.colo.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|v| v.len() >= 2 && *v != "-")
-    .collect();
-    // Longest-first so e.g. "fe80::1234" isn't half-replaced by a shorter
-    // "1234" needle that snuck in.
-    needles.sort_by_key(|v| std::cmp::Reverse(v.len()));
-
-    let mut s = line.to_string();
-    for needle in needles {
-        s = replace_token(&s, needle, REDACTED_PLACEHOLDER);
-    }
-    s = redact_ipv4_in(&s);
-    Cow::Owned(s)
-}
-
-/// `haystack.replace(needle, replacement)` but only at alphanumeric word
-/// boundaries, so an ASN like `13335` doesn't smear into a throughput value
-/// like `13335.7 Mbps`.
-fn replace_token(haystack: &str, needle: &str, replacement: &str) -> String {
-    let mut out = String::with_capacity(haystack.len());
-    let mut last = 0;
-    for (i, _) in haystack.match_indices(needle) {
-        let before = haystack[..i].chars().next_back();
-        let after = haystack[i + needle.len()..].chars().next();
-        let is_boundary = |c: Option<char>| match c {
-            None => true,
-            Some(c) => !c.is_alphanumeric(),
-        };
-        if is_boundary(before) && is_boundary(after) {
-            out.push_str(&haystack[last..i]);
-            out.push_str(replacement);
-            last = i + needle.len();
-        }
-    }
-    out.push_str(&haystack[last..]);
-    out
-}
-
-/// Replaces every IPv4 dotted-quad in `s` with `REDACTED_PLACEHOLDER`.
-/// Conservative: requires four 0–255 octets and rejects sequences that are part
-/// of a longer dotted/digit run (so `1.23ms` and `1.2.3.4.5` don't match).
-fn redact_ipv4_in(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i].is_ascii_digit() {
-            if let Some(end) = ipv4_match_end(bytes, i) {
-                out.push_str(REDACTED_PLACEHOLDER);
-                i = end;
-                continue;
-            }
-        }
-        let cp_end = next_utf8_char_end(bytes, i);
-        out.push_str(std::str::from_utf8(&bytes[i..cp_end]).unwrap_or(""));
-        i = cp_end;
-    }
-    out
-}
-
-fn ipv4_match_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut i = start;
-    for octet_idx in 0..4 {
-        if octet_idx > 0 {
-            if bytes.get(i).copied() != Some(b'.') {
-                return None;
-            }
-            i += 1;
-        }
-        let octet_start = i;
-        while i < bytes.len() && (i - octet_start) < 3 && bytes[i].is_ascii_digit() {
-            i += 1;
-        }
-        if i == octet_start {
-            return None;
-        }
-        let octet: u32 = std::str::from_utf8(&bytes[octet_start..i])
-            .ok()?
-            .parse()
-            .ok()?;
-        if octet > 255 {
-            return None;
-        }
-    }
-    // Reject when extending into a longer number / 5th octet so we don't
-    // grab the leading 4 octets of `1.2.3.4.5`.
-    if let Some(&next) = bytes.get(i) {
-        if next.is_ascii_digit() {
-            return None;
-        }
-        if next == b'.' {
-            if let Some(&peek) = bytes.get(i + 1) {
-                if peek.is_ascii_digit() {
-                    return None;
-                }
-            }
-        }
-    }
-    Some(i)
-}
-
-fn next_utf8_char_end(bytes: &[u8], start: usize) -> usize {
-    let mut i = start + 1;
-    while i < bytes.len() && (bytes[i] & 0xC0) == 0x80 {
-        i += 1;
-    }
-    i
-}
-
-/// Helper function to get the maximum y value from a series of points
-pub fn max_y(points: &[(f64, f64)]) -> f64 {
-    points.iter().map(|(_, y)| *y).fold(0.0, |a, b| a.max(b))
-}
-
-fn udp_split_bar(sent: u64, received: u64, width: usize) -> Line<'static> {
-    let safe_sent = sent.max(1);
-    let safe_received = received.min(safe_sent);
-    let lost = safe_sent.saturating_sub(safe_received);
-    // Ensure any loss shows at least one red segment
-    let lost_units = if lost > 0 {
-        (width as f64 * lost as f64 / safe_sent as f64).ceil().max(1.0) as usize
-    } else {
-        0
-    };
-    let ok_units = width.saturating_sub(lost_units);
-
-    let ok_part = "=".repeat(ok_units);
-    let lost_part = "x".repeat(lost_units);
-
-    Line::from(vec![
-        Span::styled("UDP split: ", Style::default().fg(Color::Gray)),
-        Span::raw("["),
-        Span::styled(ok_part, Style::default().fg(Color::Green)),
-        Span::styled(lost_part, Style::default().fg(Color::Red)),
-        Span::raw("] "),
-        Span::styled(format!("ok {} lost {}", safe_received, lost), Style::default().fg(Color::Gray)),
-    ])
-}
-
-/// Get color for quality label based on loss severity
-fn quality_label_color(label: &str) -> Color {
-    match label {
-        "Excellent" | "Good" => Color::Green,
-        "Acceptable" => Color::Yellow,
-        "Poor" => Color::Magenta,
-        "Bad" => Color::Red,
-        _ => Color::Gray,
-    }
-}
-
-pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
-    // Small terminal: keep the compact dashboard (gauges + sparklines).
-    // Large terminal: show full charts (like the website) alongside the live cards.
-    // Total fixed-height rows in the full dashboard:
-    //   13 (throughput) + 10 (latency) + 3 (UDP) + 5 (status) = 31
-    // We need at least ~3 rows for the Network Info / Test Activity row,
-    // so fall back to the compact layout below 34 rows. Otherwise the
-    // Status panel gets clipped at the bottom.
-    if area.height < 34 {
-        return draw_dashboard_compact(area, f, state);
-    }
-
+pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
     let main = Layout::default()
         .direction(Direction::Vertical)
         .constraints(
@@ -252,12 +40,12 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
         .split(main[0]);
 
     // Download throughput chart (left) - only show when download phase has data
-    if state.dl_phase_start.is_some() && !state.dl_points.is_empty() {
+    if state.throughput.dl_phase_start.is_some() && !state.throughput.dl_points.is_empty() {
         // Calculate x bounds only for download points
-        let dl_x_max = state.dl_points.last().map(|(x, _)| *x).unwrap_or(0.0);
-        let dl_x_min = state.dl_points.first().map(|(x, _)| *x).unwrap_or(0.0);
+        let dl_x_max = state.throughput.dl_points.last().map(|(x, _)| *x).unwrap_or(0.0);
+        let dl_x_min = state.throughput.dl_points.first().map(|(x, _)| *x).unwrap_or(0.0);
 
-        let y_dl_max = max_y(&state.dl_points).max(10.0);
+        let y_dl_max = max_y(&state.throughput.dl_points).max(10.0);
         let y_dl_max = (y_dl_max * 1.10).min(10_000.0);
 
         // Use all download points (they're already filtered to download phase)
@@ -265,18 +53,16 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             .graph_type(GraphType::Line)
             .marker(symbols::Marker::Braille)
             .style(Style::default().fg(Color::Green))
-            .data(&state.dl_points);
+            .data(&state.throughput.dl_points);
 
-        let dl_values: Vec<f64> = state.dl_points.iter().map(|(_, y)| *y).collect();
-        let dl_metrics = crate::metrics::compute_metrics(&dl_values);
+        let dl_values: Vec<f64> = state.throughput.dl_points.iter().map(|(_, y)| *y).collect();
+        let dl_metrics = crate::metrics::compute_sample_metrics(&dl_values);
         // Use the computed mean from metrics for the title to match what's shown below
-        let dl_avg = dl_metrics
-            .map(|(mean, _, _, _)| mean)
-            .unwrap_or(state.dl_avg_mbps);
+        let dl_avg = dl_metrics.map(|m| m.mean).unwrap_or(state.throughput.dl_avg_mbps);
         let dl_title = Line::from(vec![
             Span::raw("Download (inst "),
             Span::styled(
-                format!("{:.0}", state.dl_mbps),
+                format!("{:.0}", state.throughput.dl_mbps),
                 Style::default().fg(Color::Green),
             ),
             Span::raw(" / avg "),
@@ -301,12 +87,12 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
                 .title(Line::from(vec![
                     Span::raw("Download (inst "),
                     Span::styled(
-                        format!("{:.0}", state.dl_mbps),
+                        format!("{:.0}", state.throughput.dl_mbps),
                         Style::default().fg(Color::Green),
                     ),
                     Span::raw(" / avg "),
                     Span::styled(
-                        format!("{:.0}", state.dl_avg_mbps),
+                        format!("{:.0}", state.throughput.dl_avg_mbps),
                         Style::default().fg(Color::Green),
                     ),
                     Span::raw(" Mbps)"),
@@ -316,12 +102,12 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
     }
 
     // Upload throughput chart (right) - only show when upload phase has data
-    if state.ul_phase_start.is_some() && !state.ul_points.is_empty() {
+    if state.throughput.ul_phase_start.is_some() && !state.throughput.ul_points.is_empty() {
         // Calculate x bounds only for upload points
-        let ul_x_max = state.ul_points.last().map(|(x, _)| *x).unwrap_or(0.0);
-        let ul_x_min = state.ul_points.first().map(|(x, _)| *x).unwrap_or(0.0);
+        let ul_x_max = state.throughput.ul_points.last().map(|(x, _)| *x).unwrap_or(0.0);
+        let ul_x_min = state.throughput.ul_points.first().map(|(x, _)| *x).unwrap_or(0.0);
 
-        let y_ul_max = max_y(&state.ul_points).max(10.0);
+        let y_ul_max = max_y(&state.throughput.ul_points).max(10.0);
         let y_ul_max = (y_ul_max * 1.10).min(10_000.0);
 
         // Use all upload points (they're already filtered to upload phase)
@@ -329,18 +115,16 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             .graph_type(GraphType::Line)
             .marker(symbols::Marker::Braille)
             .style(Style::default().fg(Color::Cyan))
-            .data(&state.ul_points);
+            .data(&state.throughput.ul_points);
 
-        let ul_values: Vec<f64> = state.ul_points.iter().map(|(_, y)| *y).collect();
-        let ul_metrics = crate::metrics::compute_metrics(&ul_values);
+        let ul_values: Vec<f64> = state.throughput.ul_points.iter().map(|(_, y)| *y).collect();
+        let ul_metrics = crate::metrics::compute_sample_metrics(&ul_values);
         // Use the computed mean from metrics for the title to match what's shown below
-        let ul_avg = ul_metrics
-            .map(|(mean, _, _, _)| mean)
-            .unwrap_or(state.ul_avg_mbps);
+        let ul_avg = ul_metrics.map(|m| m.mean).unwrap_or(state.throughput.ul_avg_mbps);
         let ul_title = Line::from(vec![
             Span::raw("Upload (inst "),
             Span::styled(
-                format!("{:.0}", state.ul_mbps),
+                format!("{:.0}", state.throughput.ul_mbps),
                 Style::default().fg(Color::Cyan),
             ),
             Span::raw(" / avg "),
@@ -365,12 +149,12 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
                 .title(Line::from(vec![
                     Span::raw("Upload (inst "),
                     Span::styled(
-                        format!("{:.0}", state.ul_mbps),
+                        format!("{:.0}", state.throughput.ul_mbps),
                         Style::default().fg(Color::Cyan),
                     ),
                     Span::raw(" / avg "),
                     Span::styled(
-                        format!("{:.0}", state.ul_avg_mbps),
+                        format!("{:.0}", state.throughput.ul_avg_mbps),
                         Style::default().fg(Color::Cyan),
                     ),
                     Span::raw(" Mbps)"),
@@ -393,17 +177,17 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
         .split(main[1]);
 
     // Idle latency
-    if !state.idle_latency_samples.is_empty() {
+    if !state.latency.idle_latency_samples.is_empty() {
         // Use the same median calculation as the metrics below
-        let median = crate::metrics::compute_metrics(&state.idle_latency_samples)
-            .map(|(_, med, _, _)| med)
+        let median = crate::metrics::compute_sample_metrics(&state.latency.idle_latency_samples)
+            .map(|m| m.median)
             .unwrap_or(f64::NAN);
-        let jitter = crate::metrics::compute_jitter(&state.idle_latency_samples);
+        let jitter = crate::metrics::compute_jitter(&state.latency.idle_latency_samples);
         let title = Line::from(format!("Idle Latency ({:.0}ms)", median));
         charts::render_box_plot_with_metrics_inside(
             f,
             lat_row[0],
-            &state.idle_latency_samples,
+            &state.latency.idle_latency_samples,
             title,
             None,
             jitter,
@@ -416,12 +200,12 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
     }
 
     // Download latency
-    if !state.loaded_dl_latency_samples.is_empty() {
+    if !state.latency.loaded_dl_latency_samples.is_empty() {
         // Use the same median calculation as the metrics below
-        let median = crate::metrics::compute_metrics(&state.loaded_dl_latency_samples)
-            .map(|(_, med, _, _)| med)
+        let median = crate::metrics::compute_sample_metrics(&state.latency.loaded_dl_latency_samples)
+            .map(|m| m.median)
             .unwrap_or(f64::NAN);
-        let jitter = crate::metrics::compute_jitter(&state.loaded_dl_latency_samples);
+        let jitter = crate::metrics::compute_jitter(&state.latency.loaded_dl_latency_samples);
         let title = Line::from(vec![
             Span::raw("Latency Download ("),
             Span::styled(
@@ -433,7 +217,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
         charts::render_box_plot_with_metrics_inside(
             f,
             lat_row[1],
-            &state.loaded_dl_latency_samples,
+            &state.latency.loaded_dl_latency_samples,
             title,
             Some(Color::Green),
             jitter,
@@ -449,12 +233,12 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
     }
 
     // Upload latency
-    if !state.loaded_ul_latency_samples.is_empty() {
+    if !state.latency.loaded_ul_latency_samples.is_empty() {
         // Use the same median calculation as the metrics below
-        let median = crate::metrics::compute_metrics(&state.loaded_ul_latency_samples)
-            .map(|(_, med, _, _)| med)
+        let median = crate::metrics::compute_sample_metrics(&state.latency.loaded_ul_latency_samples)
+            .map(|m| m.median)
             .unwrap_or(f64::NAN);
-        let jitter = crate::metrics::compute_jitter(&state.loaded_ul_latency_samples);
+        let jitter = crate::metrics::compute_jitter(&state.latency.loaded_ul_latency_samples);
         let title = Line::from(vec![
             Span::raw("Latency Upload ("),
             Span::styled(format!("{:.0}ms", median), Style::default().fg(Color::Cyan)),
@@ -463,7 +247,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
         charts::render_box_plot_with_metrics_inside(
             f,
             lat_row[2],
-            &state.loaded_ul_latency_samples,
+            &state.latency.loaded_ul_latency_samples,
             title,
             Some(Color::Cyan),
             jitter,
@@ -479,12 +263,12 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
     }
 
     // Packet loss row (full width) with live progress during measurement
-    let (udp_sent, udp_received, udp_total, udp_latest_rtt) = if state.udp_loss_total > 0 {
+    let (udp_sent, udp_received, udp_total, udp_latest_rtt) = if state.latency.udp_loss_total > 0 {
         (
-            state.udp_loss_sent,
-            state.udp_loss_received,
-            state.udp_loss_total,
-            state.udp_loss_latest_rtt_ms,
+            state.latency.udp_loss_sent,
+            state.latency.udp_loss_received,
+            state.latency.udp_loss_total,
+            state.latency.udp_loss_latest_rtt_ms,
         )
     } else if let Some(exp) = state
         .last_result
@@ -681,6 +465,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
 
     // Determine IP version
     let ip_version = state
+        .network
         .ip
         .as_deref()
         .map(|ip| if ip.contains(':') { "IPv6" } else { "IPv4" })
@@ -692,7 +477,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
         _ => Color::Gray,
     };
 
-    let is_wireless = state.is_wireless.unwrap_or(false);
+    let is_wireless = state.network.is_wireless.unwrap_or(false);
     let (link_label, link_color) = if is_wireless {
         ("Wireless", Color::Yellow)
     } else {
@@ -704,9 +489,10 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
         REDACTED_PLACEHOLDER.to_string()
     } else {
         state
+            .network
             .network_name
             .as_deref()
-            .or_else(|| state.interface_name.as_deref())
+            .or_else(|| state.network.interface_name.as_deref())
             .unwrap_or("-")
             .to_string()
     };
@@ -718,7 +504,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
         ]),
         Line::from(vec![
             Span::styled("Interface: ", Style::default().fg(Color::Gray)),
-            Span::raw(show_or_redact(state.interface_name.as_deref(), hide).to_string()),
+            Span::raw(show_or_redact(state.network.interface_name.as_deref(), hide).to_string()),
             Span::raw(" ("),
             Span::styled(link_label, Style::default().fg(link_color)),
             Span::raw(")"),
@@ -730,14 +516,14 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
         Line::from(vec![
             Span::styled("MAC address: ", Style::default().fg(Color::Gray)),
             Span::styled(
-                show_or_redact(state.interface_mac.as_deref(), hide).to_string(),
+                show_or_redact(state.network.interface_mac.as_deref(), hide).to_string(),
                 Style::default().fg(Color::Magenta),
             ),
         ]),
     ];
 
     // Only show Certificate line if a certificate is set
-    if let Some(ref cert_filename) = state.certificate_filename {
+    if let Some(ref cert_filename) = state.network.certificate_filename {
         network_lines.push(Line::from(vec![
             Span::styled("Certificate: ", Style::default().fg(Color::Gray)),
             Span::styled(cert_filename.clone(), Style::default().fg(Color::Cyan)),
@@ -745,7 +531,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
     }
 
     // Only show Proxy line if a proxy is set
-    if let Some(ref proxy_url) = state.proxy_url {
+    if let Some(ref proxy_url) = state.network.proxy_url {
         network_lines.push(Line::from(vec![
             Span::styled("Proxy: ", Style::default().fg(Color::Gray)),
             Span::styled(proxy_url.clone(), Style::default().fg(Color::Yellow)),
@@ -755,7 +541,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
     network_lines.push(Line::from(vec![
         Span::styled("Server location: ", Style::default().fg(Color::Gray)),
         Span::styled(
-            show_or_redact(state.server.as_deref(), hide).to_string(),
+            show_or_redact(state.network.server.as_deref(), hide).to_string(),
             Style::default().fg(Color::Cyan),
         ),
     ]));
@@ -771,7 +557,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             Style::default().fg(Color::Cyan),
         ));
     } else {
-        match (state.as_org.as_deref(), state.asn.as_deref()) {
+        match (state.network.as_org.as_deref(), state.network.asn.as_deref()) {
             (Some(org), Some(asn)) => {
                 your_network.push(Span::styled(org.to_string(), Style::default().fg(Color::Cyan)));
                 your_network.push(Span::raw(" ("));
@@ -801,8 +587,8 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             Span::styled(
                 show_or_redact(
                     external_ip_for_family(
-                        state.external_ipv4.as_deref(),
-                        state.ip.as_deref(),
+                        state.network.external_ipv4.as_deref(),
+                        state.network.ip.as_deref(),
                         true,
                     ),
                     hide,
@@ -816,8 +602,8 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             Span::styled(
                 show_or_redact(
                     external_ip_for_family(
-                        state.external_ipv6.as_deref(),
-                        state.ip.as_deref(),
+                        state.network.external_ipv6.as_deref(),
+                        state.network.ip.as_deref(),
                         false,
                     ),
                     hide,
@@ -829,15 +615,15 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
     ]);
 
     // Diagnostic results at the end, before the source link
-    let has_diagnostics = state.dns_summary.is_some()
-        || state.tls_summary.is_some()
-        || state.ip_comparison.is_some()
-        || state.traceroute_summary.is_some();
+    let has_diagnostics = state.diagnostics.dns_summary.is_some()
+        || state.diagnostics.tls_summary.is_some()
+        || state.diagnostics.ip_comparison.is_some()
+        || state.diagnostics.traceroute_summary.is_some();
 
     if has_diagnostics {
         network_lines.push(Line::from("")); // Separator
 
-        if let Some(ref dns) = state.dns_summary {
+        if let Some(ref dns) = state.diagnostics.dns_summary {
             network_lines.push(Line::from(vec![
                 Span::styled("DNS resolution: ", Style::default().fg(Color::Gray)),
                 Span::styled(
@@ -847,7 +633,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             ]));
         }
 
-        if let Some(ref tls) = state.tls_summary {
+        if let Some(ref tls) = state.diagnostics.tls_summary {
             network_lines.push(Line::from(vec![
                 Span::styled("TLS handshake: ", Style::default().fg(Color::Gray)),
                 Span::styled(
@@ -862,7 +648,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             ]));
         }
 
-        if let Some(ref cmp) = state.ip_comparison {
+        if let Some(ref cmp) = state.diagnostics.ip_comparison {
             let mut cmp_spans: Vec<Span<'static>> = vec![Span::styled(
                 "IPv4 vs IPv6: ",
                 Style::default().fg(Color::Gray),
@@ -889,7 +675,7 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
             network_lines.push(Line::from(cmp_spans));
         }
 
-        if let Some(ref tr) = state.traceroute_summary {
+        if let Some(ref tr) = state.diagnostics.traceroute_summary {
             let (status, status_color) = if tr.completed {
                 ("complete", Color::Green)
             } else {
@@ -1093,283 +879,3 @@ pub fn draw_dashboard(area: Rect, f: &mut Frame, state: &UiState) {
     f.render_widget(status, main[4]);
 }
 
-pub fn draw_dashboard_compact(area: Rect, f: &mut Frame, state: &UiState) {
-    // Split into top (sparklines) and bottom (text boxes)
-    let content = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(8)].as_ref())
-        .split(area);
-
-    // Top row: Download and Upload sparklines side by side
-    let top_row = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
-        .split(content[0]);
-
-    // Download sparkline with speed in title (numbers colored green)
-    f.render_widget(
-        Sparkline::default()
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(Line::from(vec![
-                        Span::raw("Download (inst "),
-                        Span::styled(
-                            format!("{:.0}", state.dl_mbps),
-                            Style::default().fg(Color::Green),
-                        ),
-                        Span::raw(" / avg "),
-                        Span::styled(
-                            format!("{:.0}", state.dl_avg_mbps),
-                            Style::default().fg(Color::Green),
-                        ),
-                        Span::raw(" Mbps)"),
-                    ])),
-            )
-            .data(&state.dl_series)
-            .style(Style::default().fg(Color::Green)),
-        top_row[0],
-    );
-
-    // Upload sparkline with speed in title (numbers colored cyan)
-    f.render_widget(
-        Sparkline::default()
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(Line::from(vec![
-                        Span::raw("Upload (inst "),
-                        Span::styled(
-                            format!("{:.0}", state.ul_mbps),
-                            Style::default().fg(Color::Cyan),
-                        ),
-                        Span::raw(" / avg "),
-                        Span::styled(
-                            format!("{:.0}", state.ul_avg_mbps),
-                            Style::default().fg(Color::Cyan),
-                        ),
-                        Span::raw(" Mbps)"),
-                    ])),
-            )
-            .data(&state.ul_series)
-            .style(Style::default().fg(Color::Cyan)),
-        top_row[1],
-    );
-
-    // Bottom row: Idle latency text box and Status box side by side
-    let bottom_row = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
-        .split(content[1]);
-
-    // Idle latency stats text box
-    let idle_lat = if state.idle_latency_samples.is_empty() && state.idle_latency_sent == 0 {
-        None
-    } else {
-        Some(UiState::compute_live_latency_stats(
-            &state.idle_latency_samples,
-            state.idle_latency_sent,
-            state.idle_latency_received,
-        ))
-    };
-    let format_latency = |lat: &crate::model::LatencySummary| -> Vec<Line> {
-        vec![
-            Line::from(vec![
-                Span::styled("avg: ", Style::default().fg(Color::Gray)),
-                Span::raw(format!("{:.0} ms", lat.mean_ms.unwrap_or(f64::NAN))),
-            ]),
-            Line::from(vec![
-                Span::styled("med: ", Style::default().fg(Color::Gray)),
-                Span::raw(format!("{:.0} ms", lat.median_ms.unwrap_or(f64::NAN))),
-            ]),
-            Line::from(vec![
-                Span::styled("p25: ", Style::default().fg(Color::Gray)),
-                Span::raw(format!("{:.0} ms", lat.p25_ms.unwrap_or(f64::NAN))),
-            ]),
-            Line::from(vec![
-                Span::styled("p75: ", Style::default().fg(Color::Gray)),
-                Span::raw(format!("{:.0} ms", lat.p75_ms.unwrap_or(f64::NAN))),
-            ]),
-            Line::from(vec![
-                Span::styled("Jitter: ", Style::default().fg(Color::Gray)),
-                Span::raw(format!("{:.0} ms", lat.jitter_ms.unwrap_or(f64::NAN))),
-            ]),
-        ]
-    };
-    let idle_stats = Paragraph::new(
-        idle_lat
-            .as_ref()
-            .map(format_latency)
-            .unwrap_or_else(|| vec![Line::from("Waiting for data...")]),
-    )
-    .block(Block::default().borders(Borders::ALL).title("Idle Latency"));
-    f.render_widget(idle_stats, bottom_row[0]);
-
-    let mut meta_lines = vec![
-        Line::from(vec![
-            Span::styled("Phase: ", Style::default().fg(Color::Gray)),
-            Span::raw(format!("{:?}", state.phase)),
-            Span::raw("   "),
-            Span::styled("Paused: ", Style::default().fg(Color::Gray)),
-            Span::raw(format!("{}", state.paused)),
-        ]),
-        Line::from(vec![
-            Span::styled("Interface: ", Style::default().fg(Color::Gray)),
-            Span::raw(show_or_redact(state.interface_name.as_deref(), state.hide_network_info).to_string()),
-            Span::raw(" ("),
-            Span::raw(if state.is_wireless.unwrap_or(false) {
-                "Wireless"
-            } else {
-                "Wired"
-            }),
-            Span::raw(")"),
-        ]),
-        Line::from(vec![
-            Span::styled("Network: ", Style::default().fg(Color::Gray)),
-            Span::raw(if state.hide_network_info {
-                REDACTED_PLACEHOLDER.to_string()
-            } else {
-                state
-                    .network_name
-                    .as_deref()
-                    .or_else(|| state.interface_name.as_deref())
-                    .unwrap_or("-")
-                    .to_string()
-            }),
-        ]),
-    ];
-
-    // Only show Certificate line if a certificate is set
-    if let Some(ref cert_filename) = state.certificate_filename {
-        meta_lines.push(Line::from(vec![
-            Span::styled("Certificate: ", Style::default().fg(Color::Gray)),
-            Span::raw(cert_filename),
-        ]));
-    }
-
-    // Only show Proxy line if a proxy is set
-    if let Some(ref proxy_url) = state.proxy_url {
-        meta_lines.push(Line::from(vec![
-            Span::styled("Proxy: ", Style::default().fg(Color::Gray)),
-            Span::styled(proxy_url, Style::default().fg(Color::Yellow)),
-        ]));
-    }
-
-    let hide = state.hide_network_info;
-    meta_lines.extend(vec![
-        Line::from(vec![
-            Span::styled("IP/Colo: ", Style::default().fg(Color::Gray)),
-            Span::raw(format!(
-                "{} / {}",
-                show_or_redact(state.ip.as_deref(), hide),
-                show_or_redact(state.colo.as_deref(), hide),
-            )),
-        ]),
-        Line::from(vec![
-            Span::styled("Server: ", Style::default().fg(Color::Gray)),
-            Span::raw(show_or_redact(state.server.as_deref(), hide).to_string()),
-        ]),
-    ]);
-
-    // Add condensed diagnostic info if available
-    let mut diag_parts: Vec<String> = Vec::new();
-    if let Some(ref dns) = state.dns_summary {
-        diag_parts.push(format!("DNS:{:.0}ms", dns.resolution_time_ms));
-    }
-    if let Some(ref tls) = state.tls_summary {
-        diag_parts.push(format!("TLS:{:.0}ms", tls.handshake_time_ms));
-    }
-    if let Some(ref tr) = state.traceroute_summary {
-        diag_parts.push(format!("Hops:{}", tr.hops.len()));
-    }
-    if !diag_parts.is_empty() {
-        meta_lines.push(Line::from(vec![
-            Span::styled("Diag: ", Style::default().fg(Color::Gray)),
-            Span::raw(diag_parts.join(" | ")),
-        ]));
-    }
-    if let Some(exp) = state
-        .last_result
-        .as_ref()
-        .and_then(|r| r.experimental_udp.as_ref())
-    {
-        let label_color = quality_label_color(&exp.quality_label);
-        let mos_str = exp.mos.map(|m| format!(" MOS {:.1}", m)).unwrap_or_default();
-        meta_lines.push(Line::from(vec![
-            Span::styled("UDP: ", Style::default().fg(Color::Gray)),
-            Span::styled(&exp.quality_label, Style::default().fg(label_color)),
-            Span::styled(mos_str, Style::default().fg(label_color)),
-            Span::styled(format!(" loss {:.1}%", exp.latency.loss * 100.0), Style::default().fg(Color::Yellow)),
-            Span::styled(format!(" reorder {:.1}%", exp.out_of_order_pct), Style::default().fg(Color::Gray)),
-        ]));
-        meta_lines.push(udp_split_bar(exp.latency.sent, exp.latency.received, 12));
-    }
-
-    meta_lines.extend(vec![
-        Line::from(vec![
-            Span::styled("Info: ", Style::default().fg(Color::Gray)),
-            Span::raw(&state.info),
-        ]),
-        Line::from(""),
-        Line::from("Keys: q quit | r rerun | p pause | s save json | tab switch | ? help"),
-    ]);
-
-    let hide_hint = if state.hide_network_info {
-        " Shift+H to reveal "
-    } else {
-        " Shift+H to hide info "
-    };
-    let meta = Paragraph::new(meta_lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title("Network Information")
-            .title_bottom(
-                Line::from(Span::styled(hide_hint, Style::default().fg(Color::DarkGray)))
-                    .right_aligned(),
-            ),
-    );
-    f.render_widget(meta, bottom_row[1]);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn external_ip_prefers_probe_result() {
-        assert_eq!(
-            external_ip_for_family(Some("1.2.3.4"), Some("2001:db8::1"), true),
-            Some("1.2.3.4")
-        );
-        assert_eq!(
-            external_ip_for_family(Some("2001:db8::1"), Some("1.2.3.4"), false),
-            Some("2001:db8::1")
-        );
-    }
-
-    #[test]
-    fn external_ip_falls_back_to_meta_ip_of_same_family() {
-        assert_eq!(
-            external_ip_for_family(None, Some("1.2.3.4"), true),
-            Some("1.2.3.4")
-        );
-        assert_eq!(
-            external_ip_for_family(None, Some("2001:db8::1"), false),
-            Some("2001:db8::1")
-        );
-    }
-
-    #[test]
-    fn external_ip_ignores_meta_ip_of_other_family() {
-        // --ipv6-only: the v4 probe is skipped and the meta client IP is the
-        // IPv6 address; it must not appear on the IPv4 row (issue #49).
-        assert_eq!(external_ip_for_family(None, Some("2001:db8::1"), true), None);
-        assert_eq!(external_ip_for_family(None, Some("1.2.3.4"), false), None);
-    }
-
-    #[test]
-    fn external_ip_handles_missing_or_invalid_meta_ip() {
-        assert_eq!(external_ip_for_family(None, None, true), None);
-        assert_eq!(external_ip_for_family(None, Some("not-an-ip"), true), None);
-    }
-}

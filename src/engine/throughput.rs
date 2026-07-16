@@ -28,8 +28,13 @@ fn throughput_summary(bytes: u64, duration: Duration, mbps_samples: &[f64]) -> T
         (mbps, mbps, mbps, mbps)
     };
 
-    let (mean_mbps, median_mbps, p25_mbps, p75_mbps) =
-        crate::metrics::compute_metrics(mbps_samples).unwrap_or_else(fallback_mbps);
+    let (mean_mbps, median_mbps, p25_mbps, p75_mbps, p95_mbps, p99_mbps) =
+        crate::metrics::compute_sample_metrics(mbps_samples)
+            .map(|m| (m.mean, m.median, m.p25, m.p75, m.p95, m.p99))
+            .unwrap_or_else(|| {
+                let (mean, med, p25, p75) = fallback_mbps();
+                (mean, med, p25, p75, mean, mean)
+            });
 
     let mbps = mean_mbps;
 
@@ -41,6 +46,8 @@ fn throughput_summary(bytes: u64, duration: Duration, mbps_samples: &[f64]) -> T
         median_mbps: Some(median_mbps),
         p25_mbps: Some(p25_mbps),
         p75_mbps: Some(p75_mbps),
+        p95_mbps: Some(p95_mbps),
+        p99_mbps: Some(p99_mbps),
     }
 }
 
@@ -244,18 +251,21 @@ pub async fn run_upload_with_loaded_latency(
 
         handles.push(tokio::spawn(async move {
             while !stop2.load(Ordering::Relaxed) {
-                // Generate upload body as a bounded stream of bytes.
-                // We count bytes as we *produce* chunks for reqwest. This is a close approximation
-                // of bytes put on the wire and produces stable realtime Mbps for the UI.
+                // Count bytes as the HTTP client pulls chunks from the stream
+                // (backpressure-aware). On failure, subtract what we counted so
+                // the live chart stays smooth without permanently over-reporting.
                 let chunk = Bytes::from(vec![0u8; UPLOAD_CHUNK_SIZE as usize]);
 
                 let full = bytes_per_req / UPLOAD_CHUNK_SIZE;
                 let tail = bytes_per_req % UPLOAD_CHUNK_SIZE;
+                let counted = Arc::new(AtomicU64::new(0));
 
                 let total2a = total2.clone();
+                let counted_a = counted.clone();
                 let chunk_full = chunk.clone();
                 let s_full = stream::iter(0..full).map(move |_| {
                     total2a.fetch_add(UPLOAD_CHUNK_SIZE, Ordering::Relaxed);
+                    counted_a.fetch_add(UPLOAD_CHUNK_SIZE, Ordering::Relaxed);
                     Ok::<Bytes, std::io::Error>(chunk_full.clone())
                 });
 
@@ -263,17 +273,24 @@ pub async fn run_upload_with_loaded_latency(
                     s_full.boxed()
                 } else {
                     let total2b = total2.clone();
+                    let counted_b = counted.clone();
                     let chunk_tail = chunk.slice(..tail as usize);
                     let s_tail = stream::once(async move {
                         total2b.fetch_add(tail, Ordering::Relaxed);
+                        counted_b.fetch_add(tail, Ordering::Relaxed);
                         Ok::<Bytes, std::io::Error>(chunk_tail)
                     });
                     s_full.chain(s_tail).boxed()
                 };
 
                 let body = reqwest::Body::wrap_stream(body_stream);
-                if http.post(url.clone()).body(body).send().await.is_err() {
-                    errors2.fetch_add(1, Ordering::Relaxed);
+                match http.post(url.clone()).body(body).send().await {
+                    Ok(resp) if resp.status().is_success() => {}
+                    _ => {
+                        let rolled_back = counted.load(Ordering::Relaxed);
+                        total2.fetch_sub(rolled_back, Ordering::Relaxed);
+                        errors2.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }));

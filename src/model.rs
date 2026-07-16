@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::time::Duration;
 
+/// Latency `loss` is stored internally as a fraction (0.0–1.0) but serialized to
+/// JSON as a percentage (0–100). Other percentage fields (e.g. `out_of_order_pct`)
+/// are stored and serialized as percentages directly.
 mod loss_percent_serde {
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -139,6 +142,10 @@ pub struct LatencySummary {
     pub median_ms: Option<f64>,
     pub p25_ms: Option<f64>,
     pub p75_ms: Option<f64>,
+    #[serde(default)]
+    pub p95_ms: Option<f64>,
+    #[serde(default)]
+    pub p99_ms: Option<f64>,
     pub max_ms: Option<f64>,
     pub jitter_ms: Option<f64>,
 }
@@ -154,6 +161,8 @@ impl Default for LatencySummary {
             median_ms: None,
             p25_ms: None,
             p75_ms: None,
+            p95_ms: None,
+            p99_ms: None,
             max_ms: None,
             jitter_ms: None,
         }
@@ -179,6 +188,10 @@ pub struct ThroughputSummary {
     pub median_mbps: Option<f64>,
     pub p25_mbps: Option<f64>,
     pub p75_mbps: Option<f64>,
+    #[serde(default)]
+    pub p95_mbps: Option<f64>,
+    #[serde(default)]
+    pub p99_mbps: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -286,6 +299,8 @@ pub(crate) fn empty_run_result() -> RunResult {
             median_mbps: None,
             p25_mbps: None,
             p75_mbps: None,
+            p95_mbps: None,
+            p99_mbps: None,
         },
         upload: ThroughputSummary {
             bytes: 0,
@@ -295,6 +310,8 @@ pub(crate) fn empty_run_result() -> RunResult {
             median_mbps: None,
             p25_mbps: None,
             p75_mbps: None,
+            p95_mbps: None,
+            p99_mbps: None,
         },
         loaded_latency_download: LatencySummary::default(),
         loaded_latency_upload: LatencySummary::default(),

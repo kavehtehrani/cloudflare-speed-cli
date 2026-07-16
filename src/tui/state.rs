@@ -7,27 +7,12 @@ use ratatui::{
 use std::time::Instant;
 use ratatui_textarea::TextArea;
 
-pub struct UiState {
-    pub tab: usize,
-    pub paused: bool,
-    pub phase: Phase,
-    pub info: String,
-    pub comments: Option<String>,
-
+#[derive(Default)]
+pub struct ThroughputUi {
     pub dl_series: Vec<u64>,
     pub ul_series: Vec<u64>,
-    pub idle_lat_series: Vec<u64>,
-    pub loaded_dl_lat_series: Vec<u64>,
-    pub loaded_ul_lat_series: Vec<u64>,
-
-    // Time-series for charts (seconds since run start, value)
-    pub run_start: Instant,
     pub dl_points: Vec<(f64, f64)>,
     pub ul_points: Vec<(f64, f64)>,
-    pub idle_lat_points: Vec<(f64, f64)>,
-    pub loaded_dl_lat_points: Vec<(f64, f64)>,
-    pub loaded_ul_lat_points: Vec<(f64, f64)>,
-
     pub dl_mbps: f64,
     pub ul_mbps: f64,
     pub dl_avg_mbps: f64,
@@ -36,8 +21,16 @@ pub struct UiState {
     pub ul_bytes_total: u64,
     pub dl_phase_start: Option<Instant>,
     pub ul_phase_start: Option<Instant>,
+}
 
-    // Live latency samples for real-time stats
+#[derive(Default)]
+pub struct LatencyUi {
+    pub idle_lat_series: Vec<u64>,
+    pub loaded_dl_lat_series: Vec<u64>,
+    pub loaded_ul_lat_series: Vec<u64>,
+    pub idle_lat_points: Vec<(f64, f64)>,
+    pub loaded_dl_lat_points: Vec<(f64, f64)>,
+    pub loaded_ul_lat_points: Vec<(f64, f64)>,
     pub idle_latency_samples: Vec<f64>,
     pub loaded_dl_latency_samples: Vec<f64>,
     pub loaded_ul_latency_samples: Vec<f64>,
@@ -51,42 +44,63 @@ pub struct UiState {
     pub udp_loss_received: u64,
     pub udp_loss_total: u64,
     pub udp_loss_latest_rtt_ms: Option<f64>,
+}
 
-    pub last_result: Option<RunResult>,
-    pub history: Vec<RunResult>,
-    pub history_selected: usize, // Index of selected history item (0 = most recent)
-    pub history_scroll_offset: usize,
-    pub history_loaded_count: usize,
-    pub initial_history_load_size: usize, // Initial load size based on terminal height
-    // History filtering
-    pub history_filter: String,       // Current filter text
-    pub history_filter_editing: bool, // Whether user is typing in filter input
-    // Charts tab state
-    pub charts_network_filter: Option<String>, // None = all networks, Some(name) = specific network
-    pub charts_available_networks: Vec<String>, // List of unique network names from history
-    // History detail view state
-    pub history_detail_view: bool,    // Whether showing JSON detail view
-    pub history_detail_textarea: TextArea<'static>,
-    pub history_detail_search: String,        // Current regex pattern
-    pub history_detail_search_editing: bool,  // In search input mode
-    pub history_detail_search_error: Option<String>, // Last regex compile error, if any
-    // History context menu state
-    pub history_menu_open: bool,        // Whether the Space-triggered action menu is visible
-    pub history_menu_selected: usize,   // Index of the highlighted menu item
+pub struct HistoryUi {
+    pub runs: Vec<RunResult>,
+    pub selected: usize,
+    pub scroll_offset: usize,
+    pub loaded_count: usize,
+    pub initial_load_size: usize,
+    pub filter: String,
+    pub filter_editing: bool,
+    pub detail_view: bool,
+    pub detail_textarea: TextArea<'static>,
+    pub detail_search: String,
+    pub detail_search_editing: bool,
+    pub detail_search_error: Option<String>,
+    pub menu_open: bool,
+    pub menu_selected: usize,
+    pub export_modal_open: bool,
+    pub export_modal_path: Option<String>,
+    pub export_modal_copied: bool,
+    pub comment_modal_open: bool,
+    pub comment_modal_textarea: TextArea<'static>,
+}
+
+impl Default for HistoryUi {
+    fn default() -> Self {
+        Self {
+            runs: Vec::new(),
+            selected: 0,
+            scroll_offset: 0,
+            loaded_count: 0,
+            initial_load_size: 66,
+            filter: String::new(),
+            filter_editing: false,
+            detail_view: false,
+            detail_textarea: TextArea::default(),
+            detail_search: String::new(),
+            detail_search_editing: false,
+            detail_search_error: None,
+            menu_open: false,
+            menu_selected: 0,
+            export_modal_open: false,
+            export_modal_path: None,
+            export_modal_copied: false,
+            comment_modal_open: false,
+            comment_modal_textarea: TextArea::default(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct NetworkUi {
     pub ip: Option<String>,
     pub colo: Option<String>,
     pub server: Option<String>,
     pub asn: Option<String>,
     pub as_org: Option<String>,
-    pub auto_save: bool,
-    // Post-export result modal
-    pub history_export_modal_open: bool,
-    pub history_export_modal_path: Option<String>,
-    pub history_export_modal_copied: bool,
-    // Comment editor modal
-    pub history_comment_modal_open: bool,
-    pub history_comment_modal_textarea: TextArea<'static>,
-    // Network interface information
     pub interface_name: Option<String>,
     pub network_name: Option<String>,
     pub is_wireless: Option<bool>,
@@ -97,7 +111,10 @@ pub struct UiState {
     pub external_ipv6: Option<String>,
     pub certificate_filename: Option<String>,
     pub proxy_url: Option<String>,
-    // Diagnostic results
+}
+
+#[derive(Default)]
+pub struct DiagnosticsUi {
     pub dns_summary: Option<DnsSummary>,
     pub tls_summary: Option<TlsSummary>,
     pub ip_comparison: Option<IpVersionComparison>,
@@ -105,16 +122,28 @@ pub struct UiState {
     pub traceroute_enabled: bool,
     pub traceroute_max_hops: u8,
     pub traceroute_hops: Vec<TracerouteHop>,
-    /// None = check not completed, Some(None) = on latest, Some(Some(v)) = update available
-    pub update_status: Option<Option<String>>,
-    /// Rolling log of text-mode lines for the dashboard's Test Activity panel.
-    pub text_log: Vec<String>,
-    /// How far back (in lines) the dashboard's Test Activity panel is scrolled
-    /// from the bottom. 0 = pinned to newest (auto-follow).
-    pub dashboard_log_scroll: usize,
-    /// When true, identifying network info (IP, MAC, SSID, ISP, server location)
-    /// is rendered as `REDACTED_PLACEHOLDER` in the TUI. Toggled by Shift+H.
+}
+
+pub struct UiState {
+    pub tab: usize,
+    pub paused: bool,
+    pub phase: Phase,
+    pub info: String,
+    pub comments: Option<String>,
+    pub auto_save: bool,
     pub hide_network_info: bool,
+    pub run_start: Instant,
+    pub last_result: Option<RunResult>,
+    pub update_status: Option<Option<String>>,
+    pub text_log: Vec<String>,
+    pub dashboard_log_scroll: usize,
+    pub charts_network_filter: Option<String>,
+    pub charts_available_networks: Vec<String>,
+    pub throughput: ThroughputUi,
+    pub latency: LatencyUi,
+    pub history: HistoryUi,
+    pub network: NetworkUi,
+    pub diagnostics: DiagnosticsUi,
 }
 
 /// Display string used in place of identifying network info when redaction is on.
@@ -128,88 +157,23 @@ impl Default for UiState {
             phase: Phase::IdleLatency,
             info: String::new(),
             comments: None,
-            dl_series: Vec::new(),
-            ul_series: Vec::new(),
-            idle_lat_series: Vec::new(),
-            loaded_dl_lat_series: Vec::new(),
-            loaded_ul_lat_series: Vec::new(),
-            run_start: Instant::now(),
-            dl_points: Vec::new(),
-            ul_points: Vec::new(),
-            idle_lat_points: Vec::new(),
-            loaded_dl_lat_points: Vec::new(),
-            loaded_ul_lat_points: Vec::new(),
-            dl_mbps: 0.0,
-            ul_mbps: 0.0,
-            dl_avg_mbps: 0.0,
-            ul_avg_mbps: 0.0,
-            dl_bytes_total: 0,
-            ul_bytes_total: 0,
-            dl_phase_start: None,
-            ul_phase_start: None,
-            idle_latency_samples: Vec::new(),
-            loaded_dl_latency_samples: Vec::new(),
-            loaded_ul_latency_samples: Vec::new(),
-            idle_latency_sent: 0,
-            idle_latency_received: 0,
-            loaded_dl_latency_sent: 0,
-            loaded_dl_latency_received: 0,
-            loaded_ul_latency_sent: 0,
-            loaded_ul_latency_received: 0,
-            udp_loss_sent: 0,
-            udp_loss_received: 0,
-            udp_loss_total: 0,
-            udp_loss_latest_rtt_ms: None,
-            last_result: None,
-            history: Vec::new(),
-            history_selected: 0,
-            history_scroll_offset: 0,
-            history_loaded_count: 0,
-            initial_history_load_size: 66, // Default initial load size
-            history_filter: String::new(),
-            history_filter_editing: false,
-            charts_network_filter: None,
-            charts_available_networks: Vec::new(),
-            history_detail_view: false,
-            history_detail_textarea: TextArea::default(),
-            history_detail_search: String::new(),
-            history_detail_search_editing: false,
-            history_detail_search_error: None,
-            history_menu_open: false,
-            history_menu_selected: 0,
-            ip: None,
-            colo: None,
-            server: None,
-            asn: None,
-            as_org: None,
             auto_save: true,
-            history_export_modal_open: false,
-            history_export_modal_path: None,
-            history_export_modal_copied: false,
-            history_comment_modal_open: false,
-            history_comment_modal_textarea: TextArea::default(),
-            interface_name: None,
-            network_name: None,
-            is_wireless: None,
-            interface_mac: None,
-            local_ipv4: None,
-            local_ipv6: None,
-            external_ipv4: None,
-            external_ipv6: None,
-            certificate_filename: None,
-            proxy_url: None,
-            // Diagnostic results
-            dns_summary: None,
-            tls_summary: None,
-            ip_comparison: None,
-            traceroute_summary: None,
-            traceroute_enabled: false,
-            traceroute_max_hops: 30,
-            traceroute_hops: Vec::new(),
+            hide_network_info: false,
+            run_start: Instant::now(),
+            last_result: None,
             update_status: None,
             text_log: Vec::new(),
             dashboard_log_scroll: 0,
-            hide_network_info: false,
+            charts_network_filter: None,
+            charts_available_networks: Vec::new(),
+            throughput: ThroughputUi::default(),
+            latency: LatencyUi::default(),
+            history: HistoryUi::default(),
+            network: NetworkUi::default(),
+            diagnostics: DiagnosticsUi {
+                traceroute_max_hops: 30,
+                ..Default::default()
+            },
         }
     }
 }
@@ -218,6 +182,7 @@ impl Default for UiState {
 pub fn update_available_networks(state: &mut UiState) {
     let mut networks: Vec<String> = state
         .history
+        .runs
         .iter()
         .filter_map(|r| r.network_name.clone())
         .collect();
@@ -304,6 +269,45 @@ impl UiState {
         }
     }
 
+    /// Clear all per-run live state when restarting a test from the TUI.
+    pub fn reset_for_new_run(&mut self) {
+        self.phase = Phase::IdleLatency;
+        self.paused = false;
+        self.info = "Restarting…".into();
+        self.last_result = None;
+        self.run_start = std::time::Instant::now();
+
+        self.throughput = ThroughputUi::default();
+        self.latency = LatencyUi::default();
+
+        let traceroute_enabled = self.diagnostics.traceroute_enabled;
+        let traceroute_max_hops = self.diagnostics.traceroute_max_hops;
+        self.diagnostics = DiagnosticsUi {
+            traceroute_enabled,
+            traceroute_max_hops,
+            ..Default::default()
+        };
+
+        self.text_log.clear();
+        self.dashboard_log_scroll = 0;
+    }
+
+    /// Prepend a completed run to in-memory history (newest first).
+    pub fn prepend_history_run(&mut self, run: RunResult) {
+        if self
+            .history
+            .runs
+            .first()
+            .map(|r| r.meas_id == run.meas_id)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        self.history.runs.insert(0, run);
+        self.history.loaded_count = self.history.runs.len();
+        update_available_networks(self);
+    }
+
     pub fn compute_live_latency_stats(
         samples: &[f64],
         sent: u64,
@@ -333,8 +337,7 @@ impl UiState {
         let max_ms = Some(sorted[n - 1]);
 
         // Compute metrics using the same method as metrics.rs
-        if let Some((mean, median, p25, p75)) = crate::metrics::compute_metrics(samples) {
-            // Use the shared jitter computation from metrics.rs
+        if let Some(m) = crate::metrics::compute_sample_metrics(samples) {
             let jitter_ms = crate::metrics::compute_jitter(samples);
 
             crate::model::LatencySummary {
@@ -342,10 +345,12 @@ impl UiState {
                 received,
                 loss,
                 min_ms,
-                mean_ms: Some(mean),
-                median_ms: Some(median),
-                p25_ms: Some(p25),
-                p75_ms: Some(p75),
+                mean_ms: Some(m.mean),
+                median_ms: Some(m.median),
+                p25_ms: Some(m.p25),
+                p75_ms: Some(m.p75),
+                p95_ms: Some(m.p95),
+                p99_ms: Some(m.p99),
                 max_ms,
                 jitter_ms,
             }

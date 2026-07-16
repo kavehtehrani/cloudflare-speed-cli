@@ -140,14 +140,16 @@ pub fn format_event_lines(ev: &TestEvent) -> Vec<String> {
 const THROUGHPUT_LABEL_WIDTH: usize = 10;
 
 fn fmt_throughput(label: &str, values: &[f64]) -> Option<String> {
-    let (mean, median, p25, p75) = crate::metrics::compute_metrics(values)?;
+    let m = crate::metrics::compute_sample_metrics(values)?;
     Some(format!(
-        "{:<width$}avg {:.2} med {:.2} p25 {:.2} p75 {:.2}",
+        "{:<width$}avg {:.2} med {:.2} p25 {:.2} p75 {:.2} p95 {:.2} p99 {:.2}",
         format!("{}:", label),
-        mean,
-        median,
-        p25,
-        p75,
+        m.mean,
+        m.median,
+        m.p25,
+        m.p75,
+        m.p95,
+        m.p99,
         width = THROUGHPUT_LABEL_WIDTH,
     ))
 }
@@ -157,14 +159,18 @@ fn fmt_latency(
     samples: &[f64],
     summary: &crate::model::LatencySummary,
 ) -> Option<String> {
-    let (mean, median, p25, p75) = crate::metrics::compute_metrics(samples)?;
+    let m = crate::metrics::compute_sample_metrics(samples)?;
+    let p95 = summary.p95_ms.unwrap_or(m.p95);
+    let p99 = summary.p99_ms.unwrap_or(m.p99);
     Some(format!(
-        "{}: avg {:.1} med {:.1} p25 {:.1} p75 {:.1} ms (loss {:.1}%, jitter {:.1} ms)",
+        "{}: avg {:.1} med {:.1} p25 {:.1} p75 {:.1} p95 {:.1} p99 {:.1} ms (loss {:.1}%, jitter {:.1} ms)",
         label,
-        mean,
-        median,
-        p25,
-        p75,
+        m.mean,
+        m.median,
+        m.p25,
+        m.p75,
+        p95,
+        p99,
         summary.loss * 100.0,
         summary.jitter_ms.unwrap_or(f64::NAN)
     ))

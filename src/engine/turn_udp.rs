@@ -9,9 +9,8 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-/// Calculate Mean Opinion Score (MOS) using simplified ITU-T G.107 E-model.
-/// (this is lifted from Claude I haven't verified it yet)
-/// Returns a score from 1.0 (bad) to 4.5 (excellent).
+/// Calculate Mean Opinion Score (MOS) using a simplified ITU-T G.107 E-model.
+/// Returns a score from 1.0 (bad) to 5.0 (excellent).
 fn calculate_mos(rtt_ms: f64, jitter_ms: f64, loss_pct: f64) -> Option<f64> {
     if rtt_ms.is_nan() || jitter_ms.is_nan() || loss_pct.is_nan() {
         return None;
@@ -348,4 +347,28 @@ fn build_udp_socket(
 
     std_socket.set_nonblocking(true)?;
     Ok(UdpSocket::from_std(std_socket)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calculate_mos_excellent_for_low_latency_no_loss() {
+        let mos = calculate_mos(20.0, 2.0, 0.0).unwrap();
+        assert!(mos >= 4.0, "expected excellent MOS, got {mos}");
+    }
+
+    #[test]
+    fn calculate_mos_degrades_with_loss() {
+        let good = calculate_mos(30.0, 5.0, 0.0).unwrap();
+        let bad = calculate_mos(30.0, 5.0, 10.0).unwrap();
+        assert!(bad < good);
+    }
+
+    #[test]
+    fn calculate_mos_rejects_invalid_inputs() {
+        assert!(calculate_mos(f64::NAN, 1.0, 0.0).is_none());
+        assert!(calculate_mos(-1.0, 1.0, 0.0).is_none());
+    }
 }

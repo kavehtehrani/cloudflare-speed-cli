@@ -14,26 +14,26 @@ static CLIPBOARD_SENDER: OnceLock<std_mpsc::Sender<String>> = OnceLock::new();
 pub fn enrich_result_with_network_info(r: &RunResult, state: &UiState) -> RunResult {
     // Create NetworkInfo from UiState
     let network_info = crate::network::NetworkInfo {
-        interface_name: state.interface_name.clone(),
-        network_name: state.network_name.clone(),
-        is_wireless: state.is_wireless,
-        interface_mac: state.interface_mac.clone(),
-        local_ipv4: state.local_ipv4.clone(),
-        local_ipv6: state.local_ipv6.clone(),
+        interface_name: state.network.interface_name.clone(),
+        network_name: state.network.network_name.clone(),
+        is_wireless: state.network.is_wireless,
+        interface_mac: state.network.interface_mac.clone(),
+        local_ipv4: state.network.local_ipv4.clone(),
+        local_ipv6: state.network.local_ipv6.clone(),
     };
 
     // Use shared enrichment function
     let mut enriched = crate::network::enrich_result(r, &network_info);
 
     // Override with TUI state values (which may have been updated from meta)
-    enriched.ip = state.ip.clone();
-    enriched.colo = state.colo.clone();
-    enriched.asn = state.asn.clone();
-    enriched.as_org = state.as_org.clone();
+    enriched.ip = state.network.ip.clone();
+    enriched.colo = state.network.colo.clone();
+    enriched.asn = state.network.asn.clone();
+    enriched.as_org = state.network.as_org.clone();
 
     // Server might already be set, but update from state if available
     if enriched.server.is_none() {
-        enriched.server = state.server.clone();
+        enriched.server = state.network.server.clone();
     }
     enriched
 }

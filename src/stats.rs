@@ -56,7 +56,7 @@ pub fn latency_summary_from_samples(
     let max_ms = Some(sorted[n - 1]);
 
     // Compute metrics using the same method as metrics.rs
-    if let Some((mean, median, p25, p75)) = crate::metrics::compute_metrics(samples_ms) {
+    if let Some(m) = crate::metrics::compute_sample_metrics(samples_ms) {
         // Use provided jitter or compute from samples using shared function
         let jitter = jitter_ms.or_else(|| crate::metrics::compute_jitter(samples_ms));
 
@@ -65,10 +65,12 @@ pub fn latency_summary_from_samples(
             received,
             loss,
             min_ms,
-            mean_ms: Some(mean),
-            median_ms: Some(median),
-            p25_ms: Some(p25),
-            p75_ms: Some(p75),
+            mean_ms: Some(m.mean),
+            median_ms: Some(m.median),
+            p25_ms: Some(m.p25),
+            p75_ms: Some(m.p75),
+            p95_ms: Some(m.p95),
+            p99_ms: Some(m.p99),
             max_ms,
             jitter_ms: jitter,
         }

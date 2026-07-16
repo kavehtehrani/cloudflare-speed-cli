@@ -140,9 +140,23 @@ pub struct Cli {
     /// Useful for sharing screenshots or recording demos. Toggle at runtime with Shift+H.
     #[arg(long)]
     pub hide_network_info: bool,
+
+    /// Export all saved runs as a single CSV file (no test is run unless combined with a run mode).
+    #[arg(long)]
+    pub export_all_csv: Option<std::path::PathBuf>,
 }
 
 pub async fn run(args: Cli) -> Result<()> {
+    if let Some(p) = args.export_all_csv.as_deref() {
+        let all = crate::storage::load_all()?;
+        crate::storage::export_all_csv(p, &all)?;
+        eprintln!(
+            "Exported {} run(s) to {}",
+            all.len(),
+            p.display()
+        );
+    }
+
     // Validate that --silent can only be used with --json
     if args.silent && !args.json {
         return Err(anyhow::anyhow!(
@@ -290,7 +304,7 @@ pub fn bind_notice(cfg: &RunConfig) -> Option<String> {
     }
 }
 
-/// Common function to run the test engine and process results.
+/// Run the test engine and emit JSON (or stay silent).
 /// `silent` controls whether JSON is printed and whether save errors propagate.
 async fn run_test_engine(args: Cli, silent: bool) -> Result<()> {
     let cfg = build_config(&args)?;
@@ -353,8 +367,11 @@ async fn run_test_engine(args: Cli, silent: bool) -> Result<()> {
     if args.auto_save {
         if silent {
             crate::storage::save_run(&enriched).context("failed to save run results")?;
-        } else if let Ok(p) = crate::storage::save_run(&enriched) {
-            eprintln!("{}", crate::event_format::format_saved_line(&p));
+        } else {
+            match crate::storage::save_run(&enriched) {
+                Ok(p) => eprintln!("{}", crate::event_format::format_saved_line(&p)),
+                Err(e) => eprintln!("Save failed: {e:#}"),
+            }
         }
     }
 
@@ -427,7 +444,14 @@ async fn run_text(args: Cli) -> Result<()> {
         }
     }
 
-    let mut result = handle.await??;
+    let mut result = match handle.await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            eprintln!("Speed test failed: {e:#}");
+            return Err(e);
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     result.connection_quality =
         crate::quality::compute(&result, &dl_points, &ul_points);
@@ -451,8 +475,9 @@ async fn run_text(args: Cli) -> Result<()> {
         println!("{}", line);
     }
     if args.auto_save {
-        if let Ok(p) = crate::storage::save_run(&enriched) {
-            eprintln!("{}", crate::event_format::format_saved_line(&p));
+        match crate::storage::save_run(&enriched) {
+            Ok(p) => eprintln!("{}", crate::event_format::format_saved_line(&p)),
+            Err(e) => eprintln!("Save failed: {e:#}"),
         }
     }
     Ok(())

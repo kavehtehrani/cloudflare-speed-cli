@@ -43,7 +43,6 @@ pub fn delete_run(result: &RunResult) -> Result<()> {
 }
 
 pub fn export_json(path: &Path, result: &RunResult) -> Result<()> {
-    // Create parent directories if they don't exist
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context("create export directory")?;
     }
@@ -52,16 +51,21 @@ pub fn export_json(path: &Path, result: &RunResult) -> Result<()> {
     Ok(())
 }
 
-pub fn export_csv(path: &Path, result: &RunResult) -> Result<()> {
-    // Create parent directories if they don't exist
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).context("create export directory")?;
-    }
-    let mut out = String::new();
-    // Header row with all fields including diagnostics
-    out.push_str("timestamp_utc,base_url,meas_id,comments,server,download_mbps,upload_mbps,idle_mean_ms,idle_median_ms,idle_p25_ms,idle_p75_ms,idle_loss,dl_loaded_mean_ms,dl_loaded_median_ms,dl_loaded_p25_ms,dl_loaded_p75_ms,dl_loaded_loss,ul_loaded_mean_ms,ul_loaded_median_ms,ul_loaded_p25_ms,ul_loaded_p75_ms,ul_loaded_loss,ip,colo,asn,as_org,interface_name,network_name,is_wireless,interface_mac,local_ipv4,local_ipv6,external_ipv4,external_ipv6,dns_resolution_ms,dns_ipv4_count,dns_ipv6_count,dns_servers,tls_handshake_ms,tls_protocol,tls_cipher,ipv4_download_mbps,ipv4_upload_mbps,ipv4_latency_ms,ipv6_download_mbps,ipv6_upload_mbps,ipv6_latency_ms,traceroute_hops,bufferbloat_grade,bufferbloat_ms,stability_grade,stability_cv_pct,stability_cv_download_pct,stability_cv_upload_pct\n");
+const CSV_HEADER: &str = "timestamp_utc,base_url,meas_id,comments,server,download_mbps,upload_mbps,idle_mean_ms,idle_median_ms,idle_p25_ms,idle_p75_ms,idle_p95_ms,idle_p99_ms,idle_loss,dl_loaded_mean_ms,dl_loaded_median_ms,dl_loaded_p25_ms,dl_loaded_p75_ms,dl_loaded_p95_ms,dl_loaded_p99_ms,dl_loaded_loss,ul_loaded_mean_ms,ul_loaded_median_ms,ul_loaded_p25_ms,ul_loaded_p75_ms,ul_loaded_p95_ms,ul_loaded_p99_ms,ul_loaded_loss,ip,colo,asn,as_org,interface_name,network_name,is_wireless,interface_mac,local_ipv4,local_ipv6,external_ipv4,external_ipv6,dns_resolution_ms,dns_ipv4_count,dns_ipv6_count,dns_servers,tls_handshake_ms,tls_protocol,tls_cipher,ipv4_download_mbps,ipv4_upload_mbps,ipv4_latency_ms,ipv6_download_mbps,ipv6_upload_mbps,ipv6_latency_ms,traceroute_hops,bufferbloat_grade,bufferbloat_ms,stability_grade,stability_cv_pct,stability_cv_download_pct,stability_cv_upload_pct\n";
 
-    // Extract diagnostic values
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn opt_f64(v: Option<f64>) -> String {
+    v.map(|x| format!("{:.3}", x)).unwrap_or_default()
+}
+
+fn csv_row(result: &RunResult) -> String {
     let dns_resolution_ms = result.dns.as_ref().map(|d| d.resolution_time_ms);
     let dns_ipv4_count = result.dns.as_ref().map(|d| d.ipv4_count);
     let dns_ipv6_count = result.dns.as_ref().map(|d| d.ipv6_count);
@@ -74,7 +78,6 @@ pub fn export_csv(path: &Path, result: &RunResult) -> Result<()> {
     let tls_protocol = result.tls.as_ref().and_then(|t| t.protocol_version.clone());
     let tls_cipher = result.tls.as_ref().and_then(|t| t.cipher_suite.clone());
 
-    // IPv4 results
     let ipv4_download = result
         .ip_comparison
         .as_ref()
@@ -94,7 +97,6 @@ pub fn export_csv(path: &Path, result: &RunResult) -> Result<()> {
         .filter(|r| r.available)
         .map(|r| r.latency_ms);
 
-    // IPv6 results
     let ipv6_download = result
         .ip_comparison
         .as_ref()
@@ -114,10 +116,8 @@ pub fn export_csv(path: &Path, result: &RunResult) -> Result<()> {
         .filter(|r| r.available)
         .map(|r| r.latency_ms);
 
-    // Traceroute hop count
     let traceroute_hops = result.traceroute.as_ref().map(|t| t.hops.len());
 
-    // Connection quality fields
     let (cq_bloat_grade, cq_bloat_ms, cq_stab_grade, cq_stab_cv, cq_stab_cv_dl, cq_stab_cv_ul) =
         match result.connection_quality.as_ref() {
             Some(cq) => (
@@ -128,15 +128,18 @@ pub fn export_csv(path: &Path, result: &RunResult) -> Result<()> {
                 cq.stability_cv_download_pct.map(|v| format!("{:.3}", v)).unwrap_or_default(),
                 cq.stability_cv_upload_pct.map(|v| format!("{:.3}", v)).unwrap_or_default(),
             ),
-            // Legacy runs (None) emit empty CSV cells. New runs with one half
-            // uncomputable emit the GRADE_UNAVAILABLE sentinel ("-") in the grade
-            // column and an empty value column. Downstream parsers should treat
-            // both empty and "-" as "not available" for the grade columns.
-            None => (String::new(), String::new(), String::new(), String::new(), String::new(), String::new()),
+            None => (
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
         };
 
-    out.push_str(&format!(
-        "{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.6},{:.3},{:.3},{:.3},{:.3},{:.6},{:.3},{:.3},{:.3},{:.3},{:.6},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+    format!(
+        "{},{},{},{},{},{:.3},{:.3},{},{},{},{},{},{},{:.6},{},{},{},{},{},{},{:.6},{},{},{},{},{},{},{:.6},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
         csv_escape(&result.timestamp_utc),
         csv_escape(&result.base_url),
         csv_escape(&result.meas_id),
@@ -144,20 +147,26 @@ pub fn export_csv(path: &Path, result: &RunResult) -> Result<()> {
         csv_escape(result.server.as_deref().unwrap_or("")),
         result.download.mbps,
         result.upload.mbps,
-        result.idle_latency.mean_ms.unwrap_or(f64::NAN),
-        result.idle_latency.median_ms.unwrap_or(f64::NAN),
-        result.idle_latency.p25_ms.unwrap_or(f64::NAN),
-        result.idle_latency.p75_ms.unwrap_or(f64::NAN),
+        opt_f64(result.idle_latency.mean_ms),
+        opt_f64(result.idle_latency.median_ms),
+        opt_f64(result.idle_latency.p25_ms),
+        opt_f64(result.idle_latency.p75_ms),
+        opt_f64(result.idle_latency.p95_ms),
+        opt_f64(result.idle_latency.p99_ms),
         result.idle_latency.loss,
-        result.loaded_latency_download.mean_ms.unwrap_or(f64::NAN),
-        result.loaded_latency_download.median_ms.unwrap_or(f64::NAN),
-        result.loaded_latency_download.p25_ms.unwrap_or(f64::NAN),
-        result.loaded_latency_download.p75_ms.unwrap_or(f64::NAN),
+        opt_f64(result.loaded_latency_download.mean_ms),
+        opt_f64(result.loaded_latency_download.median_ms),
+        opt_f64(result.loaded_latency_download.p25_ms),
+        opt_f64(result.loaded_latency_download.p75_ms),
+        opt_f64(result.loaded_latency_download.p95_ms),
+        opt_f64(result.loaded_latency_download.p99_ms),
         result.loaded_latency_download.loss,
-        result.loaded_latency_upload.mean_ms.unwrap_or(f64::NAN),
-        result.loaded_latency_upload.median_ms.unwrap_or(f64::NAN),
-        result.loaded_latency_upload.p25_ms.unwrap_or(f64::NAN),
-        result.loaded_latency_upload.p75_ms.unwrap_or(f64::NAN),
+        opt_f64(result.loaded_latency_upload.mean_ms),
+        opt_f64(result.loaded_latency_upload.median_ms),
+        opt_f64(result.loaded_latency_upload.p25_ms),
+        opt_f64(result.loaded_latency_upload.p75_ms),
+        opt_f64(result.loaded_latency_upload.p95_ms),
+        opt_f64(result.loaded_latency_upload.p99_ms),
         result.loaded_latency_upload.loss,
         csv_escape(result.ip.as_deref().unwrap_or("")),
         csv_escape(result.colo.as_deref().unwrap_or("")),
@@ -165,13 +174,15 @@ pub fn export_csv(path: &Path, result: &RunResult) -> Result<()> {
         csv_escape(result.as_org.as_deref().unwrap_or("")),
         csv_escape(result.interface_name.as_deref().unwrap_or("")),
         csv_escape(result.network_name.as_deref().unwrap_or("")),
-        result.is_wireless.map(|w| if w { "true" } else { "false" }).unwrap_or(""),
+        result
+            .is_wireless
+            .map(|w| if w { "true" } else { "false" })
+            .unwrap_or(""),
         csv_escape(result.interface_mac.as_deref().unwrap_or("")),
         csv_escape(result.local_ipv4.as_deref().unwrap_or("")),
         csv_escape(result.local_ipv6.as_deref().unwrap_or("")),
         csv_escape(result.external_ipv4.as_deref().unwrap_or("")),
         csv_escape(result.external_ipv6.as_deref().unwrap_or("")),
-        // Diagnostic fields
         dns_resolution_ms.map(|v| format!("{:.3}", v)).unwrap_or_default(),
         dns_ipv4_count.map(|v| v.to_string()).unwrap_or_default(),
         dns_ipv6_count.map(|v| v.to_string()).unwrap_or_default(),
@@ -192,48 +203,84 @@ pub fn export_csv(path: &Path, result: &RunResult) -> Result<()> {
         cq_stab_cv,
         cq_stab_cv_dl,
         cq_stab_cv_ul,
-    ));
+    )
+}
+
+pub fn export_csv(path: &Path, result: &RunResult) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("create export directory")?;
+    }
+    let mut out = String::from(CSV_HEADER);
+    out.push_str(&csv_row(result));
     std::fs::write(path, out).context("write export csv")?;
     Ok(())
 }
 
-/// Escape a string for CSV format (handles commas, quotes, and newlines).
-fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
+/// Export multiple runs as a single CSV file (one header row, one row per run).
+pub fn export_all_csv(path: &Path, results: &[RunResult]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("create export directory")?;
     }
+    let mut out = String::from(CSV_HEADER);
+    for result in results {
+        out.push_str(&csv_row(result));
+    }
+    std::fs::write(path, out).context("write export csv")?;
+    Ok(())
 }
 
-pub fn load_recent(limit: usize) -> Result<Vec<RunResult>> {
+/// List run JSON paths newest-first without reading file contents.
+fn list_run_paths(limit: usize) -> Result<Vec<PathBuf>> {
     ensure_dirs()?;
     let dir = runs_dir();
-    // Sort by filename: run files are named `run-{timestamp}-{meas_id}.json` where the
-    // timestamp is the run's own ISO timestamp. Lex order on filename matches run order,
-    // and is stable against file rewrites (e.g. editing a comment) which would otherwise
-    // push an old run to the top if we sorted by mtime.
     let mut entries: Vec<PathBuf> = Vec::new();
     for e in std::fs::read_dir(&dir).context("read runs dir")? {
         let e = e?;
         let p = e.path();
-        if p.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
+        if p.extension().and_then(|e| e.to_str()) == Some("json") {
+            entries.push(p);
         }
-        entries.push(p);
     }
     entries.sort_by(|a, b| {
         let an = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let bn = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        bn.cmp(an) // descending: newest first
+        bn.cmp(an)
     });
+    entries.truncate(limit);
+    Ok(entries)
+}
 
-    let mut out = Vec::new();
-    for p in entries.into_iter().take(limit) {
+pub fn load_recent(limit: usize) -> Result<Vec<RunResult>> {
+    let paths = list_run_paths(limit)?;
+    let mut out = Vec::with_capacity(paths.len());
+    for p in paths {
         let data = std::fs::read(&p).with_context(|| format!("read {}", p.display()))?;
         let r: RunResult =
             serde_json::from_slice(&data).with_context(|| format!("parse {}", p.display()))?;
         out.push(r);
     }
     Ok(out)
+}
+
+/// Load all saved runs, newest first.
+pub fn load_all() -> Result<Vec<RunResult>> {
+    load_recent(usize::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::empty_run_result;
+
+    #[test]
+    fn csv_row_includes_p95_p99_columns() {
+        let mut r = empty_run_result();
+        r.timestamp_utc = "2026-01-01T00:00:00Z".into();
+        r.meas_id = "123".into();
+        r.base_url = "https://speed.cloudflare.com".into();
+        r.idle_latency.p95_ms = Some(42.0);
+        r.idle_latency.p99_ms = Some(99.0);
+        let row = csv_row(&r);
+        assert!(row.contains(",42.000,99.000,"));
+    }
 }

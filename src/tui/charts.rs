@@ -65,9 +65,9 @@ pub fn render_box_plot_with_metrics_inside(
         let n = sorted.len();
         let min_val = sorted[0];
         let max_val = sorted[n - 1];
-        let q1 = sorted[n / 4];
-        let med = sorted[n / 2];
-        let q3 = sorted[3 * n / 4];
+        let q1 = crate::metrics::percentile(samples, 0.25).unwrap_or(sorted[0]);
+        let med = crate::metrics::percentile(samples, 0.5).unwrap_or(sorted[0]);
+        let q3 = crate::metrics::percentile(samples, 0.75).unwrap_or(sorted[n - 1]);
         let mean = samples.iter().sum::<f64>() / n as f64;
 
         let canvas = Canvas::default()
@@ -102,8 +102,8 @@ pub fn render_box_plot_with_metrics_inside(
         f.render_widget(canvas, chart_metrics[0]);
 
         // Render metrics in bottom area
-        if let Some(metrics) = crate::metrics::compute_metrics(samples) {
-            let metrics_text = render_metrics_text(metrics, jitter, loss, color);
+        if let Some(m) = crate::metrics::compute_sample_metrics(samples) {
+            let metrics_text = render_metrics_text(m, jitter, loss, color);
             f.render_widget(
                 Paragraph::new(metrics_text).alignment(Alignment::Center),
                 chart_metrics[1],
@@ -121,12 +121,15 @@ pub fn render_box_plot_with_metrics_inside(
 
 /// Helper function to render metrics text (avg, med, p25, p75, and optionally jitter, loss)
 fn render_metrics_text<'a>(
-    metrics: (f64, f64, f64, f64),
+    metrics: crate::metrics::SampleMetrics,
     jitter: Option<f64>,
     loss: Option<f64>,
     color: Option<Color>,
 ) -> Line<'a> {
-    let (mean_val, median_val, p25_val, p75_val) = metrics;
+    let mean_val = metrics.mean;
+    let median_val = metrics.median;
+    let p25_val = metrics.p25;
+    let p75_val = metrics.p75;
     if let Some(c) = color {
         let mut spans = vec![
             Span::styled("avg", Style::default().fg(Color::Gray)),
@@ -175,7 +178,7 @@ pub fn render_chart_with_metrics_inside(
     x_axis: ratatui::widgets::Axis,
     y_axis: ratatui::widgets::Axis,
     title: Line,
-    metrics: Option<(f64, f64, f64, f64)>,
+    metrics: Option<crate::metrics::SampleMetrics>,
     color: Color,
 ) {
     // Get inner area (accounting for borders)
@@ -240,6 +243,7 @@ pub fn draw_charts(area: Rect, f: &mut Frame, state: &UiState) {
     // Filter history by selected network
     let filtered_data: Vec<&RunResult> = state
         .history
+        .runs
         .iter()
         .filter(|r| {
             if let Some(ref filter_network) = state.charts_network_filter {

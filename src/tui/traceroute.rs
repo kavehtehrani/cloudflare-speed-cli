@@ -15,20 +15,22 @@ const HOST_WIDTH: usize = 38;
 /// Render the Traceroute tab content.
 pub fn draw_traceroute(area: Rect, f: &mut Frame, state: &UiState) {
     let destination = state
+        .diagnostics
         .traceroute_summary
         .as_ref()
         .map(|s| s.destination.clone())
         .unwrap_or_else(|| "Cloudflare edge".to_string());
 
     let completed = state
+        .diagnostics
         .traceroute_summary
         .as_ref()
         .map(|s| s.completed)
         .unwrap_or(false);
     let status = if completed { "complete" } else { "partial" };
 
-    let received = state.traceroute_hops.len();
-    let max = state.traceroute_max_hops as usize;
+    let received = state.diagnostics.traceroute_hops.len();
+    let max = state.diagnostics.traceroute_max_hops as usize;
 
     let mut lines: Vec<Line> = Vec::with_capacity(received + 3);
 
@@ -42,12 +44,13 @@ pub fn draw_traceroute(area: Rect, f: &mut Frame, state: &UiState) {
     lines.push(Line::from(""));
 
     let max_min_rtt = state
+        .diagnostics
         .traceroute_hops
         .iter()
         .filter_map(min_rtt)
         .fold(0.0_f64, f64::max);
 
-    for hop in &state.traceroute_hops {
+    for hop in &state.diagnostics.traceroute_hops {
         let idx = format!("{:>2}", hop.hop_number);
         let host_or_ip = format_host_or_ip(hop);
         let host_field = pad_or_truncate(&host_or_ip, HOST_WIDTH);

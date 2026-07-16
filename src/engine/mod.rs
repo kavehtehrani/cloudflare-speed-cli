@@ -70,10 +70,13 @@ impl TestEngine {
         // 1. /meta endpoint (may have full details)
         // 2. /cdn-cgi/trace endpoint (reliable source for colo, ip, country)
         // 3. Response headers (fallback)
-        let mut meta: Option<serde_json::Value> = match cloudflare::fetch_meta(&client).await {
-            Ok(v) if !v.as_object().map(|m| m.is_empty()).unwrap_or(true) => Some(v),
-            _ => None,
-        };
+        // Each fetch uses a short timeout so a slow endpoint doesn't block the test.
+        let meta_timeout = crate::constants::META_FETCH_TIMEOUT;
+        let mut meta: Option<serde_json::Value> =
+            match tokio::time::timeout(meta_timeout, cloudflare::fetch_meta(&client)).await {
+                Ok(Ok(v)) if !v.as_object().map(|m| m.is_empty()).unwrap_or(true) => Some(v),
+                _ => None,
+            };
 
         // If meta is empty or missing colo, try /cdn-cgi/trace
         let has_colo = meta
@@ -83,7 +86,9 @@ impl TestEngine {
             .is_some();
 
         if !has_colo {
-            if let Ok(trace_meta) = cloudflare::fetch_trace(&client).await {
+            if let Ok(Ok(trace_meta)) =
+                tokio::time::timeout(meta_timeout, cloudflare::fetch_trace(&client)).await
+            {
                 if !trace_meta.as_object().map(|m| m.is_empty()).unwrap_or(true) {
                     // Merge trace_meta into meta
                     if let Some(ref mut existing) = meta {
@@ -105,10 +110,17 @@ impl TestEngine {
 
         // Final fallback to response headers
         if meta.is_none() {
-            meta = cloudflare::fetch_meta_from_response(&client).await.ok();
+            meta = tokio::time::timeout(meta_timeout, cloudflare::fetch_meta_from_response(&client))
+                .await
+                .ok()
+                .and_then(Result::ok);
         }
 
-        let locations = cloudflare::fetch_locations(&client).await.ok();
+        let locations =
+            match tokio::time::timeout(meta_timeout, cloudflare::fetch_locations(&client)).await {
+                Ok(Ok(v)) => Some(v),
+                _ => None,
+            };
         let server = meta
             .as_ref()
             .and_then(|m: &serde_json::Value| {

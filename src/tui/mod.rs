@@ -65,28 +65,28 @@ pub async fn run(args: Cli) -> Result<()> {
         hide_network_info: args.hide_network_info,
         ..Default::default()
     };
-    state.initial_history_load_size = initial_load;
-    state.history = crate::storage::load_recent(initial_load).unwrap_or_default();
-    state.history_loaded_count = state.history.len();
+    state.history.initial_load_size = initial_load;
+    state.history.runs = crate::storage::load_recent(initial_load).unwrap_or_default();
+    state.history.loaded_count = state.history.runs.len();
     update_available_networks(&mut state);
 
     // Gather network interface information using shared module
     let network_info = crate::network::gather_network_info(&args);
-    state.interface_name = network_info.interface_name.clone();
-    state.network_name = network_info.network_name.clone();
-    state.is_wireless = network_info.is_wireless;
-    state.interface_mac = network_info.interface_mac.clone();
-    state.local_ipv4 = network_info.local_ipv4.clone();
-    state.local_ipv6 = network_info.local_ipv6.clone();
-    state.certificate_filename = args
+    state.network.interface_name = network_info.interface_name.clone();
+    state.network.network_name = network_info.network_name.clone();
+    state.network.is_wireless = network_info.is_wireless;
+    state.network.interface_mac = network_info.interface_mac.clone();
+    state.network.local_ipv4 = network_info.local_ipv4.clone();
+    state.network.local_ipv6 = network_info.local_ipv6.clone();
+    state.network.certificate_filename = args
         .certificate
         .as_ref()
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
         .map(|s| s.to_string());
-    state.proxy_url = args.proxy.clone();
-    state.traceroute_enabled = args.traceroute;
-    state.traceroute_max_hops = args.traceroute_max_hops;
+    state.network.proxy_url = args.proxy.clone();
+    state.diagnostics.traceroute_enabled = args.traceroute;
+    state.diagnostics.traceroute_max_hops = args.traceroute_max_hops;
 
     // Spawn background task to check for updates (non-blocking, silent on error)
     let (update_tx, mut update_rx) = tokio::sync::mpsc::channel::<Option<String>>(1);
@@ -122,26 +122,26 @@ pub async fn run(args: Cli) -> Result<()> {
                     }
 
                     // Handle filter input mode (when on history tab and editing filter)
-                    if state.tab == 1 && state.history_filter_editing {
+                    if state.tab == 1 && state.history.filter_editing {
                         match k.code {
                             KeyCode::Esc => {
                                 // Cancel editing, clear filter
-                                state.history_filter_editing = false;
-                                state.history_filter.clear();
-                                state.history_selected = 0;
-                                state.history_scroll_offset = 0;
+                                state.history.filter_editing = false;
+                                state.history.filter.clear();
+                                state.history.selected = 0;
+                                state.history.scroll_offset = 0;
                             }
                             KeyCode::Enter => {
                                 // Apply filter and exit editing mode
-                                state.history_filter_editing = false;
-                                state.history_selected = 0;
-                                state.history_scroll_offset = 0;
+                                state.history.filter_editing = false;
+                                state.history.selected = 0;
+                                state.history.scroll_offset = 0;
                             }
                             KeyCode::Backspace => {
-                                state.history_filter.pop();
+                                state.history.filter.pop();
                             }
                             KeyCode::Char(c) => {
-                                state.history_filter.push(c);
+                                state.history.filter.push(c);
                             }
                             _ => {}
                         }
@@ -149,25 +149,25 @@ pub async fn run(args: Cli) -> Result<()> {
                     }
 
                     // Handle comment editor modal (text input mode)
-                    if state.tab == 1 && state.history_comment_modal_open {
+                    if state.tab == 1 && state.history.comment_modal_open {
                         handle_history_comment_modal_key(&mut state, k);
                         continue;
                     }
 
                     // Handle export result modal (when on history tab and modal is open)
-                    if state.tab == 1 && state.history_export_modal_open {
+                    if state.tab == 1 && state.history.export_modal_open {
                         handle_history_export_modal_key(&mut state, k.code);
                         continue;
                     }
 
                     // Handle context menu mode (when on history tab and menu is open)
-                    if state.tab == 1 && state.history_menu_open {
+                    if state.tab == 1 && state.history.menu_open {
                         handle_history_menu_key(&mut state, k.code);
                         continue;
                     }
 
                     // Handle detail view mode (when on history tab and viewing JSON detail)
-                    if state.tab == 1 && state.history_detail_view {
+                    if state.tab == 1 && state.history.detail_view {
                         handle_history_detail_key(&mut state, k);
                         continue;
                     }
@@ -191,28 +191,28 @@ pub async fn run(args: Cli) -> Result<()> {
                         (_, KeyCode::Char('r')) => {
                             // Refresh history (only when on history tab)
                             if state.tab == 1 {
-                                let reload_size = state.initial_history_load_size.max(state.history_loaded_count);
+                                let reload_size = state.history.initial_load_size.max(state.history.loaded_count);
                                 match crate::storage::load_recent(reload_size) {
                                     Ok(new_history) => {
-                                        let old_count = state.history.len();
-                                        state.history = new_history;
-                                        state.history_loaded_count = state.history.len();
+                                        let old_count = state.history.runs.len();
+                                        state.history.runs = new_history;
+                                        state.history.loaded_count = state.history.runs.len();
                                         update_available_networks(&mut state);
 
                                         // Adjust selection if needed
-                                        if state.history_selected >= state.history.len() && !state.history.is_empty() {
-                                            state.history_selected = state.history.len() - 1;
-                                        } else if state.history.is_empty() {
-                                            state.history_selected = 0;
-                                            state.history_scroll_offset = 0;
+                                        if state.history.selected >= state.history.runs.len() && !state.history.runs.is_empty() {
+                                            state.history.selected = state.history.runs.len() - 1;
+                                        } else if state.history.runs.is_empty() {
+                                            state.history.selected = 0;
+                                            state.history.scroll_offset = 0;
                                         }
 
                                         // Adjust scroll offset if needed
-                                        if state.history_scroll_offset >= state.history.len() && !state.history.is_empty() {
-                                            state.history_scroll_offset = state.history.len().saturating_sub(20).max(0);
+                                        if state.history.scroll_offset >= state.history.runs.len() && !state.history.runs.is_empty() {
+                                            state.history.scroll_offset = state.history.runs.len().saturating_sub(20).max(0);
                                         }
 
-                                        let new_count = state.history.len();
+                                        let new_count = state.history.runs.len();
                                         if new_count > old_count {
                                             state.info = format!("Refreshed: {} new run(s)", new_count - old_count);
                                         } else if new_count < old_count {
@@ -234,50 +234,7 @@ pub async fn run(args: Cli) -> Result<()> {
                                         let _ = h.await;
                                     }
                                 }
-                                state.last_result = None;
-                                state.run_start = Instant::now();
-                                state.dl_series.clear();
-                                state.ul_series.clear();
-                                state.idle_lat_series.clear();
-                                state.loaded_dl_lat_series.clear();
-                                state.loaded_ul_lat_series.clear();
-                                state.dl_points.clear();
-                                state.ul_points.clear();
-                                state.idle_lat_points.clear();
-                                state.loaded_dl_lat_points.clear();
-                                state.loaded_ul_lat_points.clear();
-                                state.dl_mbps = 0.0;
-                                state.ul_mbps = 0.0;
-                                state.dl_avg_mbps = 0.0;
-                                state.ul_avg_mbps = 0.0;
-                                state.dl_bytes_total = 0;
-                                state.ul_bytes_total = 0;
-                                state.dl_phase_start = None;
-                                state.ul_phase_start = None;
-                                state.idle_latency_samples.clear();
-                                state.loaded_dl_latency_samples.clear();
-                                state.loaded_ul_latency_samples.clear();
-                                state.idle_latency_sent = 0;
-                                state.idle_latency_received = 0;
-                                state.loaded_dl_latency_sent = 0;
-                                state.loaded_dl_latency_received = 0;
-                                state.loaded_ul_latency_sent = 0;
-                                state.loaded_ul_latency_received = 0;
-                                state.phase = Phase::IdleLatency;
-                                state.paused = false;
-                                // Clear UDP loss counters
-                                state.udp_loss_sent = 0;
-                                state.udp_loss_received = 0;
-                                state.udp_loss_total = 0;
-                                state.udp_loss_latest_rtt_ms = None;
-                                // Clear diagnostic results
-                                state.dns_summary = None;
-                                state.tls_summary = None;
-                                state.ip_comparison = None;
-                                state.traceroute_summary = None;
-                                state.traceroute_hops.clear();
-                                state.text_log.clear();
-                                state.dashboard_log_scroll = 0;
+                                state.reset_for_new_run();
                                 run_ctx = Some(start_run(&args).await?);
                             }
                         }
@@ -301,26 +258,26 @@ pub async fn run(args: Cli) -> Result<()> {
                         }
                         (KeyModifiers::SHIFT, KeyCode::BackTab) => {
                             // Shift+Tab cycles backwards
-                            let tab_count = if state.traceroute_enabled { 5 } else { 4 };
+                            let tab_count = if state.diagnostics.traceroute_enabled { 5 } else { 4 };
                             let new_tab = if state.tab == 0 { tab_count - 1 } else { state.tab - 1 };
                             state.tab = new_tab;
                             if new_tab == 1 {
-                                state.history_selected = 0;
-                                state.history_scroll_offset = 0;
+                                state.history.selected = 0;
+                                state.history.scroll_offset = 0;
                             }
                         }
                         (_, KeyCode::Tab) => {
-                            let tab_count = if state.traceroute_enabled { 5 } else { 4 };
+                            let tab_count = if state.diagnostics.traceroute_enabled { 5 } else { 4 };
                             let new_tab = (state.tab + 1) % tab_count;
                             state.tab = new_tab;
                             // Reset history selection when switching to history tab
                             if new_tab == 1 {
-                                state.history_selected = 0;
-                                state.history_scroll_offset = 0;
+                                state.history.selected = 0;
+                                state.history.scroll_offset = 0;
                             }
                         }
                         (_, KeyCode::Char('?')) => {
-                            state.tab = if state.traceroute_enabled { 4 } else { 3 }; // help
+                            state.tab = if state.diagnostics.traceroute_enabled { 4 } else { 3 }; // help
                         }
                         (_, KeyCode::Enter) => {
                             // Quick-open detail view for the selected history row.
@@ -330,21 +287,21 @@ pub async fn run(args: Cli) -> Result<()> {
                         }
                         (_, KeyCode::Char(' ')) => {
                             if state.tab == 1
-                                && !state.history.is_empty()
-                                && !state.history_filter_editing
-                                && !state.history_detail_view
-                                && !state.history_export_modal_open
-                                && !state.history_comment_modal_open
+                                && !state.history.runs.is_empty()
+                                && !state.history.filter_editing
+                                && !state.history.detail_view
+                                && !state.history.export_modal_open
+                                && !state.history.comment_modal_open
                             {
-                                state.history_menu_open = true;
-                                state.history_menu_selected = history::MENU_ITEM_VIEW;
+                                state.history.menu_open = true;
+                                state.history.menu_selected = history::MENU_ITEM_VIEW;
                             }
                         }
                         // History navigation and deletion (only when on History tab)
                         (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
-                            if state.tab == 1 && !state.history.is_empty() {
-                                if state.history_selected > 0 {
-                                    state.history_selected -= 1;
+                            if state.tab == 1 && !state.history.runs.is_empty() {
+                                if state.history.selected > 0 {
+                                    state.history.selected -= 1;
                                 }
                             } else if state.tab == 0 {
                                 // Dashboard: scroll Test Activity log back one line.
@@ -358,38 +315,19 @@ pub async fn run(args: Cli) -> Result<()> {
                                 // Dashboard: scroll Test Activity log forward one line.
                                 state.dashboard_log_scroll =
                                     state.dashboard_log_scroll.saturating_sub(1);
-                            } else if state.tab == 1 && !state.history.is_empty() {
-                                if state.history_selected < state.history.len().saturating_sub(1) {
-                                    state.history_selected += 1;
+                            } else if state.tab == 1 && !state.history.runs.is_empty() {
+                                if state.history.selected < state.history.runs.len().saturating_sub(1) {
+                                    state.history.selected += 1;
 
                                     // Lazy load: if near end of loaded items, load more
-                                    let load_threshold = state.history_loaded_count.saturating_sub(10);
-                                    if state.history_selected >= load_threshold && state.history_loaded_count == state.history.len() {
-                                        let current_count = state.history.len();
-                                        let load_more = current_count.max(20);
-                                        if let Ok(more_history) = crate::storage::load_recent(load_more) {
-                                            let existing_ids: std::collections::HashSet<_> = state.history
-                                                .iter()
-                                                .map(|r| &r.meas_id)
-                                                .collect();
-                                            let new_items: Vec<_> = more_history
-                                                .into_iter()
-                                                .filter(|r| !existing_ids.contains(&r.meas_id))
-                                                .collect();
-                                            if !new_items.is_empty() {
-                                                state.history.extend(new_items);
-                                                state.history_loaded_count = state.history.len();
-                                                update_available_networks(&mut state);
-                                            }
-                                        }
-                                    }
+                                    lazy_load_more_history(&mut state);
                                 }
                             }
                         }
                         (_, KeyCode::PageUp) => {
-                            if state.tab == 1 && !state.history.is_empty() {
+                            if state.tab == 1 && !state.history.runs.is_empty() {
                                 let page_size = 20;
-                                state.history_selected = state.history_selected.saturating_sub(page_size);
+                                state.history.selected = state.history.selected.saturating_sub(page_size);
                             } else if state.tab == 0 {
                                 let max_scroll = state.text_log.len().saturating_sub(1);
                                 state.dashboard_log_scroll =
@@ -400,46 +338,27 @@ pub async fn run(args: Cli) -> Result<()> {
                             if state.tab == 0 {
                                 state.dashboard_log_scroll =
                                     state.dashboard_log_scroll.saturating_sub(10);
-                            } else if state.tab == 1 && !state.history.is_empty() {
+                            } else if state.tab == 1 && !state.history.runs.is_empty() {
                                 let page_size = 20;
-                                let max_idx = state.history.len().saturating_sub(1);
-                                state.history_selected = (state.history_selected + page_size).min(max_idx);
+                                let max_idx = state.history.runs.len().saturating_sub(1);
+                                state.history.selected = (state.history.selected + page_size).min(max_idx);
 
                                 // Lazy load if near the end
-                                let load_threshold = state.history_loaded_count.saturating_sub(10);
-                                if state.history_selected >= load_threshold && state.history_loaded_count == state.history.len() {
-                                    let current_count = state.history.len();
-                                    let load_more = current_count.max(20);
-                                    if let Ok(more_history) = crate::storage::load_recent(load_more) {
-                                        let existing_ids: std::collections::HashSet<_> = state.history
-                                            .iter()
-                                            .map(|r| &r.meas_id)
-                                            .collect();
-                                        let new_items: Vec<_> = more_history
-                                            .into_iter()
-                                            .filter(|r| !existing_ids.contains(&r.meas_id))
-                                            .collect();
-                                        if !new_items.is_empty() {
-                                            state.history.extend(new_items);
-                                            state.history_loaded_count = state.history.len();
-                                            update_available_networks(&mut state);
-                                        }
-                                    }
-                                }
+                                lazy_load_more_history(&mut state);
                             }
                         }
                         // Filter controls (only on History tab)
                         (_, KeyCode::Char('/')) => {
                             if state.tab == 1 {
-                                state.history_filter_editing = true;
+                                state.history.filter_editing = true;
                             }
                         }
                         (_, KeyCode::Esc) => {
-                            if state.tab == 1 && !state.history_filter.is_empty() {
+                            if state.tab == 1 && !state.history.filter.is_empty() {
                                 // Clear filter when Escape pressed and filter is active
-                                state.history_filter.clear();
-                                state.history_selected = 0;
-                                state.history_scroll_offset = 0;
+                                state.history.filter.clear();
+                                state.history.selected = 0;
+                                state.history.scroll_offset = 0;
                             }
                         }
                         // Charts tab: cycle through networks with left/right or h/l
@@ -525,20 +444,20 @@ pub async fn run(args: Cli) -> Result<()> {
                             match h.await {
                                 Ok(Ok(mut r)) => {
                                     r.connection_quality =
-                                        crate::quality::compute(&r, &state.dl_points, &state.ul_points);
+                                        crate::quality::compute(&r, &state.throughput.dl_points, &state.throughput.ul_points);
                                     if state.auto_save {
                                         save_and_show_path(&r, &mut state);
                                     }
                                     if let Some(meta) = r.meta.as_ref() {
                                         let extracted = crate::network::extract_metadata(meta);
-                                        state.ip = extracted.ip;
-                                        state.colo = extracted.colo;
-                                        state.asn = extracted.asn;
-                                        state.as_org = extracted.as_org;
+                                        state.network.ip = extracted.ip;
+                                        state.network.colo = extracted.colo;
+                                        state.network.asn = extracted.asn;
+                                        state.network.as_org = extracted.as_org;
                                     }
                                     // Server should be set from RunResult.server
                                     if r.server.is_some() {
-                                        state.server = r.server.clone();
+                                        state.network.server = r.server.clone();
                                     }
                                     // Enrich result with network info before storing
                                     let enriched = enrich_result_with_network_info(&r, &state);
@@ -548,11 +467,11 @@ pub async fn run(args: Cli) -> Result<()> {
                                     // dashboard's Test Activity panel so users see the final numbers.
                                     for line in crate::event_format::format_result_summary(
                                         &enriched,
-                                        &state.dl_points,
-                                        &state.ul_points,
-                                        &state.idle_latency_samples,
-                                        &state.loaded_dl_latency_samples,
-                                        &state.loaded_ul_latency_samples,
+                                        &state.throughput.dl_points,
+                                        &state.throughput.ul_points,
+                                        &state.latency.idle_latency_samples,
+                                        &state.latency.loaded_dl_latency_samples,
+                                        &state.latency.loaded_ul_latency_samples,
                                     ) {
                                         UiState::push_log_line(&mut state.text_log, line);
                                     }
@@ -576,15 +495,10 @@ pub async fn run(args: Cli) -> Result<()> {
                                     }
 
                                     // Reload history to include the new test
-                                    // Load at least one more than we had before to ensure the new test is included
-                                    let reload_size = (state.history_loaded_count + 1).max(state.initial_history_load_size);
-                                    state.history = crate::storage::load_recent(reload_size).unwrap_or_default();
-                                    state.history_loaded_count = state.history.len();
-                                    update_available_networks(&mut state);
-                                    // Reset selection to show the new test (most recent) if on history tab
+                                    state.prepend_history_run(enriched.clone());
                                     if state.tab == 1 {
-                                        state.history_selected = 0;
-                                        state.history_scroll_offset = 0;
+                                        state.history.selected = 0;
+                                        state.history.scroll_offset = 0;
                                     }
                                 }
                                 Ok(Err(e)) => state.info = format!("Run failed: {e:#}"),
@@ -605,6 +519,28 @@ pub async fn run(args: Cli) -> Result<()> {
     let mut stdout = io::stdout();
     execute!(stdout, LeaveAlternateScreen).ok();
     res
+}
+
+fn lazy_load_more_history(state: &mut UiState) {
+    let load_threshold = state.history.loaded_count.saturating_sub(10);
+    if state.history.selected < load_threshold || state.history.loaded_count != state.history.runs.len() {
+        return;
+    }
+    let current_count = state.history.runs.len();
+    let load_more = current_count.max(20);
+    if let Ok(more_history) = crate::storage::load_recent(load_more) {
+        let existing_ids: std::collections::HashSet<_> =
+            state.history.runs.iter().map(|r| &r.meas_id).collect();
+        let new_items: Vec<_> = more_history
+            .into_iter()
+            .filter(|r| !existing_ids.contains(&r.meas_id))
+            .collect();
+        if !new_items.is_empty() {
+            state.history.runs.extend(new_items);
+            state.history.loaded_count = state.history.runs.len();
+            update_available_networks(state);
+        }
+    }
 }
 
 struct RunCtx {
@@ -653,33 +589,33 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
             match phase {
                 Phase::IdleLatency => {
                     // Reset idle latency tracking
-                    state.idle_latency_samples.clear();
-                    state.idle_latency_sent = 0;
-                    state.idle_latency_received = 0;
+                    state.latency.idle_latency_samples.clear();
+                    state.latency.idle_latency_sent = 0;
+                    state.latency.idle_latency_received = 0;
                 }
                 Phase::Download => {
-                    state.dl_phase_start = Some(Instant::now());
-                    state.dl_bytes_total = 0;
-                    state.dl_avg_mbps = 0.0;
+                    state.throughput.dl_phase_start = Some(Instant::now());
+                    state.throughput.dl_bytes_total = 0;
+                    state.throughput.dl_avg_mbps = 0.0;
                     // Reset loaded DL latency tracking
-                    state.loaded_dl_latency_samples.clear();
-                    state.loaded_dl_latency_sent = 0;
-                    state.loaded_dl_latency_received = 0;
+                    state.latency.loaded_dl_latency_samples.clear();
+                    state.latency.loaded_dl_latency_sent = 0;
+                    state.latency.loaded_dl_latency_received = 0;
                 }
                 Phase::Upload => {
-                    state.ul_phase_start = Some(Instant::now());
-                    state.ul_bytes_total = 0;
-                    state.ul_avg_mbps = 0.0;
+                    state.throughput.ul_phase_start = Some(Instant::now());
+                    state.throughput.ul_bytes_total = 0;
+                    state.throughput.ul_avg_mbps = 0.0;
                     // Reset loaded UL latency tracking
-                    state.loaded_ul_latency_samples.clear();
-                    state.loaded_ul_latency_sent = 0;
-                    state.loaded_ul_latency_received = 0;
+                    state.latency.loaded_ul_latency_samples.clear();
+                    state.latency.loaded_ul_latency_sent = 0;
+                    state.latency.loaded_ul_latency_received = 0;
                 }
                 Phase::PacketLoss => {
-                    state.udp_loss_sent = 0;
-                    state.udp_loss_received = 0;
-                    state.udp_loss_total = 0;
-                    state.udp_loss_latest_rtt_ms = None;
+                    state.latency.udp_loss_sent = 0;
+                    state.latency.udp_loss_received = 0;
+                    state.latency.udp_loss_total = 0;
+                    state.latency.udp_loss_latest_rtt_ms = None;
                 }
                 _ => {}
             }
@@ -688,22 +624,22 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
         TestEvent::MetaInfo { meta } => {
             // Extract IP, colo, ASN, and org from meta
             let extracted = crate::network::extract_metadata(&meta);
-            state.ip = extracted.ip;
-            state.colo = extracted.colo;
-            state.asn = extracted.asn;
-            state.as_org = extracted.as_org;
+            state.network.ip = extracted.ip;
+            state.network.colo = extracted.colo;
+            state.network.asn = extracted.asn;
+            state.network.as_org = extracted.as_org;
 
             // Extract city for server location (if available, use it directly)
             if let Some(city) = meta.get("city").and_then(|v| v.as_str()) {
                 // If we have city, use it for server location
                 if let Some(country) = meta.get("country").and_then(|v| v.as_str()) {
-                    state.server = Some(format!("{}, {}", city, country));
+                    state.network.server = Some(format!("{}, {}", city, country));
                 } else {
-                    state.server = Some(city.to_string());
+                    state.network.server = Some(city.to_string());
                 }
-            } else if let Some(ref colo) = state.colo {
+            } else if let Some(ref colo) = state.network.colo {
                 // Use colo code as server if no city available
-                state.server = Some(colo.clone());
+                state.network.server = Some(colo.clone());
             }
         }
         TestEvent::LatencySample {
@@ -715,53 +651,56 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
             let t = state.run_start.elapsed().as_secs_f64();
             match (phase, during) {
                 (Phase::IdleLatency, _) => {
-                    state.idle_latency_sent += 1;
+                    state.latency.idle_latency_sent += 1;
                     if ok {
-                        state.idle_latency_received += 1;
+                        state.latency.idle_latency_received += 1;
                         if let Some(ms) = rtt_ms {
                             let v = ms.round().clamp(0.0, 5000.0) as u64;
-                            UiState::push_series(&mut state.idle_lat_series, v);
-                            UiState::push_point(&mut state.idle_lat_points, t, ms);
-                            state.idle_latency_samples.push(ms);
+                            UiState::push_series(&mut state.latency.idle_lat_series, v);
+                            UiState::push_point(&mut state.latency.idle_lat_points, t, ms);
+                            state.latency.idle_latency_samples.push(ms);
                             // Keep reasonable sample size
-                            if state.idle_latency_samples.len() > 10000 {
+                            if state.latency.idle_latency_samples.len() > 10000 {
                                 state
+                                    .latency
                                     .idle_latency_samples
-                                    .drain(0..(state.idle_latency_samples.len() - 10000));
+                                    .drain(0..(state.latency.idle_latency_samples.len() - 10000));
                             }
                         }
                     }
                 }
                 (Phase::Download, Some(Phase::Download)) => {
-                    state.loaded_dl_latency_sent += 1;
+                    state.latency.loaded_dl_latency_sent += 1;
                     if ok {
-                        state.loaded_dl_latency_received += 1;
+                        state.latency.loaded_dl_latency_received += 1;
                         if let Some(ms) = rtt_ms {
                             let v = ms.round().clamp(0.0, 5000.0) as u64;
-                            UiState::push_series(&mut state.loaded_dl_lat_series, v);
-                            UiState::push_point(&mut state.loaded_dl_lat_points, t, ms);
-                            state.loaded_dl_latency_samples.push(ms);
-                            if state.loaded_dl_latency_samples.len() > 10000 {
+                            UiState::push_series(&mut state.latency.loaded_dl_lat_series, v);
+                            UiState::push_point(&mut state.latency.loaded_dl_lat_points, t, ms);
+                            state.latency.loaded_dl_latency_samples.push(ms);
+                            if state.latency.loaded_dl_latency_samples.len() > 10000 {
                                 state
+                                    .latency
                                     .loaded_dl_latency_samples
-                                    .drain(0..(state.loaded_dl_latency_samples.len() - 10000));
+                                    .drain(0..(state.latency.loaded_dl_latency_samples.len() - 10000));
                             }
                         }
                     }
                 }
                 (Phase::Upload, Some(Phase::Upload)) => {
-                    state.loaded_ul_latency_sent += 1;
+                    state.latency.loaded_ul_latency_sent += 1;
                     if ok {
-                        state.loaded_ul_latency_received += 1;
+                        state.latency.loaded_ul_latency_received += 1;
                         if let Some(ms) = rtt_ms {
                             let v = ms.round().clamp(0.0, 5000.0) as u64;
-                            UiState::push_series(&mut state.loaded_ul_lat_series, v);
-                            UiState::push_point(&mut state.loaded_ul_lat_points, t, ms);
-                            state.loaded_ul_latency_samples.push(ms);
-                            if state.loaded_ul_latency_samples.len() > 10000 {
+                            UiState::push_series(&mut state.latency.loaded_ul_lat_series, v);
+                            UiState::push_point(&mut state.latency.loaded_ul_lat_points, t, ms);
+                            state.latency.loaded_ul_latency_samples.push(ms);
+                            if state.latency.loaded_ul_latency_samples.len() > 10000 {
                                 state
+                                    .latency
                                     .loaded_ul_latency_samples
-                                    .drain(0..(state.loaded_ul_latency_samples.len() - 10000));
+                                    .drain(0..(state.latency.loaded_ul_latency_samples.len() - 10000));
                             }
                         }
                     }
@@ -778,26 +717,26 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
             let t = state.run_start.elapsed().as_secs_f64();
             match phase {
                 Phase::Download => {
-                    state.dl_mbps = mbps;
-                    state.dl_bytes_total = bytes_total;
-                    if let Some(t0) = state.dl_phase_start {
+                    state.throughput.dl_mbps = mbps;
+                    state.throughput.dl_bytes_total = bytes_total;
+                    if let Some(t0) = state.throughput.dl_phase_start {
                         let secs = t0.elapsed().as_secs_f64().max(1e-9);
-                        state.dl_avg_mbps = ((bytes_total as f64) / secs) * 8.0 / 1_000_000.0;
+                        state.throughput.dl_avg_mbps = ((bytes_total as f64) / secs) * 8.0 / 1_000_000.0;
                     }
-                    let v = state.dl_mbps.round().clamp(0.0, 10_000.0) as u64;
-                    UiState::push_series(&mut state.dl_series, v);
-                    UiState::push_point(&mut state.dl_points, t, state.dl_mbps.max(0.0));
+                    let v = state.throughput.dl_mbps.round().clamp(0.0, 10_000.0) as u64;
+                    UiState::push_series(&mut state.throughput.dl_series, v);
+                    UiState::push_point(&mut state.throughput.dl_points, t, state.throughput.dl_mbps.max(0.0));
                 }
                 Phase::Upload => {
-                    state.ul_mbps = mbps;
-                    state.ul_bytes_total = bytes_total;
-                    if let Some(t0) = state.ul_phase_start {
+                    state.throughput.ul_mbps = mbps;
+                    state.throughput.ul_bytes_total = bytes_total;
+                    if let Some(t0) = state.throughput.ul_phase_start {
                         let secs = t0.elapsed().as_secs_f64().max(1e-9);
-                        state.ul_avg_mbps = ((bytes_total as f64) / secs) * 8.0 / 1_000_000.0;
+                        state.throughput.ul_avg_mbps = ((bytes_total as f64) / secs) * 8.0 / 1_000_000.0;
                     }
-                    let v = state.ul_mbps.round().clamp(0.0, 10_000.0) as u64;
-                    UiState::push_series(&mut state.ul_series, v);
-                    UiState::push_point(&mut state.ul_points, t, state.ul_mbps.max(0.0));
+                    let v = state.throughput.ul_mbps.round().clamp(0.0, 10_000.0) as u64;
+                    UiState::push_series(&mut state.throughput.ul_series, v);
+                    UiState::push_point(&mut state.throughput.ul_points, t, state.throughput.ul_mbps.max(0.0));
                 }
                 _ => {}
             }
@@ -808,10 +747,10 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
             total,
             rtt_ms,
         } => {
-            state.udp_loss_sent = sent;
-            state.udp_loss_received = received;
-            state.udp_loss_total = total;
-            state.udp_loss_latest_rtt_ms = rtt_ms;
+            state.latency.udp_loss_sent = sent;
+            state.latency.udp_loss_received = received;
+            state.latency.udp_loss_total = total;
+            state.latency.udp_loss_latest_rtt_ms = rtt_ms;
             let loss_pct = if sent == 0 {
                 0.0
             } else {
@@ -830,7 +769,7 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
                 summary.resolution_time_ms,
                 summary.resolved_ips.len()
             );
-            state.dns_summary = Some(summary);
+            state.diagnostics.dns_summary = Some(summary);
         }
         TestEvent::DiagnosticTls { summary } => {
             state.info = format!(
@@ -838,7 +777,7 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
                 summary.handshake_time_ms,
                 summary.protocol_version.as_deref().unwrap_or("-")
             );
-            state.tls_summary = Some(summary);
+            state.diagnostics.tls_summary = Some(summary);
         }
         TestEvent::DiagnosticIpComparison { comparison } => {
             let v4_info = comparison
@@ -864,7 +803,7 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
                 })
                 .unwrap_or_else(|| "-".to_string());
             state.info = format!("IP Comparison: {} / {}", v4_info, v6_info);
-            state.ip_comparison = Some(comparison);
+            state.diagnostics.ip_comparison = Some(comparison);
         }
         TestEvent::TracerouteHop { hop_number, hop } => {
             let addr = hop.ip_address.as_deref().unwrap_or("*");
@@ -874,7 +813,7 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
                 .map(|r| format!("{:.1}ms", r))
                 .unwrap_or_else(|| "*".to_string());
             state.info = format!("Traceroute hop {}: {} {}", hop_number, addr, rtt);
-            state.traceroute_hops.push(hop);
+            state.diagnostics.traceroute_hops.push(hop);
         }
         TestEvent::TracerouteComplete { summary } => {
             state.info = format!(
@@ -882,20 +821,20 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
                 summary.hops.len(),
                 summary.destination
             );
-            state.traceroute_summary = Some(summary);
+            state.diagnostics.traceroute_summary = Some(summary);
         }
         TestEvent::ExternalIps { ipv4, ipv6 } => {
-            state.external_ipv4 = ipv4;
-            state.external_ipv6 = ipv6;
+            state.network.external_ipv4 = ipv4;
+            state.network.external_ipv6 = ipv6;
         }
     }
 }
 
 fn open_history_detail(state: &mut UiState) {
-    if state.history.is_empty() || state.history_selected >= state.history.len() {
+    if state.history.runs.is_empty() || state.history.selected >= state.history.runs.len() {
         return;
     }
-    let r = &state.history[state.history_selected];
+    let r = &state.history.runs[state.history.selected];
     let json = serde_json::to_string_pretty(r)
         .unwrap_or_else(|e| format!("Error serializing JSON: {}", e));
     let lines: Vec<String> = json.lines().map(String::from).collect();
@@ -905,32 +844,32 @@ fn open_history_detail(state: &mut UiState) {
         lines
     });
     textarea.set_cursor_line_style(ratatui::style::Style::default());
-    state.history_detail_textarea = textarea;
-    state.history_detail_search.clear();
-    state.history_detail_search_editing = false;
-    state.history_detail_search_error = None;
-    state.history_detail_view = true;
+    state.history.detail_textarea = textarea;
+    state.history.detail_search.clear();
+    state.history.detail_search_editing = false;
+    state.history.detail_search_error = None;
+    state.history.detail_view = true;
 }
 
 fn close_history_detail(state: &mut UiState) {
-    state.history_detail_view = false;
-    state.history_detail_textarea = ratatui_textarea::TextArea::default();
-    state.history_detail_search.clear();
-    state.history_detail_search_editing = false;
-    state.history_detail_search_error = None;
+    state.history.detail_view = false;
+    state.history.detail_textarea = ratatui_textarea::TextArea::default();
+    state.history.detail_search.clear();
+    state.history.detail_search_editing = false;
+    state.history.detail_search_error = None;
 }
 
 fn apply_detail_search_pattern(state: &mut UiState) {
-    let pattern = state.history_detail_search.clone();
-    match state.history_detail_textarea.set_search_pattern(&pattern) {
+    let pattern = state.history.detail_search.clone();
+    match state.history.detail_textarea.set_search_pattern(&pattern) {
         Ok(_) => {
-            state.history_detail_search_error = None;
+            state.history.detail_search_error = None;
             if !pattern.is_empty() {
-                state.history_detail_textarea.search_forward(false);
+                state.history.detail_textarea.search_forward(false);
             }
         }
         Err(e) => {
-            state.history_detail_search_error = Some(e.to_string());
+            state.history.detail_search_error = Some(e.to_string());
         }
     }
 }
@@ -938,25 +877,25 @@ fn apply_detail_search_pattern(state: &mut UiState) {
 fn handle_history_detail_key(state: &mut UiState, k: crossterm::event::KeyEvent) {
     use crossterm::event::KeyCode;
 
-    if state.history_detail_search_editing {
+    if state.history.detail_search_editing {
         match k.code {
             KeyCode::Esc => {
                 // Cancel search input: clear pattern and exit editing mode.
-                state.history_detail_search.clear();
-                state.history_detail_search_editing = false;
-                state.history_detail_search_error = None;
-                let _ = state.history_detail_textarea.set_search_pattern("");
+                state.history.detail_search.clear();
+                state.history.detail_search_editing = false;
+                state.history.detail_search_error = None;
+                let _ = state.history.detail_textarea.set_search_pattern("");
             }
             KeyCode::Enter => {
-                state.history_detail_search_editing = false;
+                state.history.detail_search_editing = false;
                 apply_detail_search_pattern(state);
             }
             KeyCode::Backspace => {
-                state.history_detail_search.pop();
+                state.history.detail_search.pop();
                 apply_detail_search_pattern(state);
             }
             KeyCode::Char(c) => {
-                state.history_detail_search.push(c);
+                state.history.detail_search.push(c);
                 apply_detail_search_pattern(state);
             }
             _ => {}
@@ -966,58 +905,64 @@ fn handle_history_detail_key(state: &mut UiState, k: crossterm::event::KeyEvent)
 
     match k.code {
         KeyCode::Esc => {
-            if !state.history_detail_search.is_empty() {
+            if !state.history.detail_search.is_empty() {
                 // Active search: clear it instead of closing the view.
-                state.history_detail_search.clear();
-                state.history_detail_search_error = None;
-                let _ = state.history_detail_textarea.set_search_pattern("");
+                state.history.detail_search.clear();
+                state.history.detail_search_error = None;
+                let _ = state.history.detail_textarea.set_search_pattern("");
             } else {
                 close_history_detail(state);
             }
         }
         KeyCode::Char('q') => close_history_detail(state),
         KeyCode::Char('/') => {
-            state.history_detail_search_editing = true;
-            state.history_detail_search_error = None;
+            state.history.detail_search_editing = true;
+            state.history.detail_search_error = None;
         }
         KeyCode::Char('n') => {
-            if !state.history_detail_search.is_empty() {
-                state.history_detail_textarea.search_forward(false);
+            if !state.history.detail_search.is_empty() {
+                state.history.detail_textarea.search_forward(false);
             }
         }
         KeyCode::Char('N') => {
-            if !state.history_detail_search.is_empty() {
-                state.history_detail_textarea.search_back(false);
+            if !state.history.detail_search.is_empty() {
+                state.history.detail_textarea.search_back(false);
             }
         }
         KeyCode::Up | KeyCode::Char('k') => {
             state
-                .history_detail_textarea
+                .history
+                .detail_textarea
                 .move_cursor(ratatui_textarea::CursorMove::Up);
         }
         KeyCode::Down | KeyCode::Char('j') => {
             state
-                .history_detail_textarea
+                .history
+                .detail_textarea
                 .move_cursor(ratatui_textarea::CursorMove::Down);
         }
         KeyCode::PageUp => {
             state
-                .history_detail_textarea
+                .history
+                .detail_textarea
                 .scroll(ratatui_textarea::Scrolling::PageUp);
         }
         KeyCode::PageDown => {
             state
-                .history_detail_textarea
+                .history
+                .detail_textarea
                 .scroll(ratatui_textarea::Scrolling::PageDown);
         }
         KeyCode::Home => {
             state
-                .history_detail_textarea
+                .history
+                .detail_textarea
                 .move_cursor(ratatui_textarea::CursorMove::Top);
         }
         KeyCode::End => {
             state
-                .history_detail_textarea
+                .history
+                .detail_textarea
                 .move_cursor(ratatui_textarea::CursorMove::Bottom);
         }
         _ => {}
@@ -1025,16 +970,16 @@ fn handle_history_detail_key(state: &mut UiState, k: crossterm::event::KeyEvent)
 }
 
 fn open_export_modal(state: &mut UiState, path: String) {
-    state.history_export_modal_open = true;
-    state.history_export_modal_path = Some(path);
-    state.history_export_modal_copied = false;
+    state.history.export_modal_open = true;
+    state.history.export_modal_path = Some(path);
+    state.history.export_modal_copied = false;
 }
 
 fn export_history_selected_json(state: &mut UiState) {
-    if state.history.is_empty() || state.history_selected >= state.history.len() {
+    if state.history.runs.is_empty() || state.history.selected >= state.history.runs.len() {
         return;
     }
-    let r = &state.history[state.history_selected];
+    let r = &state.history.runs[state.history.selected];
     match export_result_json(r, state) {
         Ok(p) => open_export_modal(state, p.to_string_lossy().to_string()),
         Err(e) => state.info = format!("JSON export failed: {e:#}"),
@@ -1042,10 +987,10 @@ fn export_history_selected_json(state: &mut UiState) {
 }
 
 fn export_history_selected_csv(state: &mut UiState) {
-    if state.history.is_empty() || state.history_selected >= state.history.len() {
+    if state.history.runs.is_empty() || state.history.selected >= state.history.runs.len() {
         return;
     }
-    let r = &state.history[state.history_selected];
+    let r = &state.history.runs[state.history.selected];
     match export_result_csv(r, state) {
         Ok(p) => open_export_modal(state, p.to_string_lossy().to_string()),
         Err(e) => state.info = format!("CSV export failed: {e:#}"),
@@ -1053,10 +998,10 @@ fn export_history_selected_csv(state: &mut UiState) {
 }
 
 fn open_comment_modal(state: &mut UiState) {
-    if state.history.is_empty() || state.history_selected >= state.history.len() {
+    if state.history.runs.is_empty() || state.history.selected >= state.history.runs.len() {
         return;
     }
-    let existing = state.history[state.history_selected]
+    let existing = state.history.runs[state.history.selected]
         .comments
         .clone()
         .unwrap_or_default();
@@ -1071,39 +1016,40 @@ fn open_comment_modal(state: &mut UiState) {
     // and the underline looks out of place.
     textarea.set_cursor_line_style(ratatui::style::Style::default());
     textarea.set_placeholder_text("Type a comment\u{2026}");
-    state.history_comment_modal_textarea = textarea;
-    state.history_comment_modal_open = true;
+    state.history.comment_modal_textarea = textarea;
+    state.history.comment_modal_open = true;
 }
 
 fn handle_history_comment_modal_key(state: &mut UiState, k: crossterm::event::KeyEvent) {
     match k.code {
         KeyCode::Esc => {
-            state.history_comment_modal_open = false;
-            state.history_comment_modal_textarea = ratatui_textarea::TextArea::default();
+            state.history.comment_modal_open = false;
+            state.history.comment_modal_textarea = ratatui_textarea::TextArea::default();
         }
         KeyCode::Enter => {
-            if state.history_selected < state.history.len() {
+            if state.history.selected < state.history.runs.len() {
                 let value = state
-                    .history_comment_modal_textarea
+                    .history
+                    .comment_modal_textarea
                     .lines()
                     .join(" ")
                     .trim()
                     .to_string();
                 let new_comment = if value.is_empty() { None } else { Some(value) };
-                state.history[state.history_selected].comments = new_comment;
-                if let Err(e) = crate::storage::save_run(&state.history[state.history_selected]) {
+                state.history.runs[state.history.selected].comments = new_comment;
+                if let Err(e) = crate::storage::save_run(&state.history.runs[state.history.selected]) {
                     state.info = format!("Save comment failed: {e:#}");
                 } else {
                     state.info = "Comment saved".into();
                 }
             }
-            state.history_comment_modal_open = false;
-            state.history_comment_modal_textarea = ratatui_textarea::TextArea::default();
+            state.history.comment_modal_open = false;
+            state.history.comment_modal_textarea = ratatui_textarea::TextArea::default();
         }
         _ => {
             // Delegate all other keys (arrows, Home/End, Backspace, Delete, characters)
             // to the textarea widget.
-            state.history_comment_modal_textarea.input(Event::Key(k));
+            state.history.comment_modal_textarea.input(Event::Key(k));
         }
     }
 }
@@ -1111,12 +1057,12 @@ fn handle_history_comment_modal_key(state: &mut UiState, k: crossterm::event::Ke
 fn handle_history_export_modal_key(state: &mut UiState, code: KeyCode) {
     match code {
         KeyCode::Esc | KeyCode::Enter => {
-            state.history_export_modal_open = false;
+            state.history.export_modal_open = false;
         }
         KeyCode::Char('c') => {
-            if let Some(ref path) = state.history_export_modal_path {
+            if let Some(ref path) = state.history.export_modal_path {
                 match copy_to_clipboard(path) {
-                    Ok(_) => state.history_export_modal_copied = true,
+                    Ok(_) => state.history.export_modal_copied = true,
                     Err(e) => state.info = format!("Clipboard copy failed: {e:#}"),
                 }
             }
@@ -1126,23 +1072,23 @@ fn handle_history_export_modal_key(state: &mut UiState, code: KeyCode) {
 }
 
 fn delete_history_selected(state: &mut UiState) {
-    if state.history.is_empty() || state.history_selected >= state.history.len() {
+    if state.history.runs.is_empty() || state.history.selected >= state.history.runs.len() {
         return;
     }
-    let to_delete = state.history[state.history_selected].clone();
+    let to_delete = state.history.runs[state.history.selected].clone();
     if let Err(e) = crate::storage::delete_run(&to_delete) {
         state.info = format!("Delete failed: {e:#}");
         return;
     }
-    state.history.remove(state.history_selected);
-    if state.history_scroll_offset >= state.history.len() && !state.history.is_empty() {
-        state.history_scroll_offset = state.history.len().saturating_sub(20).max(0);
+    state.history.runs.remove(state.history.selected);
+    if state.history.scroll_offset >= state.history.runs.len() && !state.history.runs.is_empty() {
+        state.history.scroll_offset = state.history.runs.len().saturating_sub(20).max(0);
     }
-    if state.history_selected >= state.history.len() && !state.history.is_empty() {
-        state.history_selected = state.history.len() - 1;
-    } else if state.history.is_empty() {
-        state.history_selected = 0;
-        state.history_scroll_offset = 0;
+    if state.history.selected >= state.history.runs.len() && !state.history.runs.is_empty() {
+        state.history.selected = state.history.runs.len() - 1;
+    } else if state.history.runs.is_empty() {
+        state.history.selected = 0;
+        state.history.scroll_offset = 0;
     }
     state.info = "Deleted".into();
 }
@@ -1151,17 +1097,17 @@ fn handle_history_menu_key(state: &mut UiState, code: KeyCode) {
     let n = history::MENU_ITEM_COUNT;
     match code {
         KeyCode::Esc | KeyCode::Char(' ') => {
-            state.history_menu_open = false;
+            state.history.menu_open = false;
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            state.history_menu_selected = (state.history_menu_selected + n - 1) % n;
+            state.history.menu_selected = (state.history.menu_selected + n - 1) % n;
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            state.history_menu_selected = (state.history_menu_selected + 1) % n;
+            state.history.menu_selected = (state.history.menu_selected + 1) % n;
         }
         KeyCode::Enter => {
-            let idx = state.history_menu_selected;
-            state.history_menu_open = false;
+            let idx = state.history.menu_selected;
+            state.history.menu_open = false;
             match idx {
                 history::MENU_ITEM_VIEW => open_history_detail(state),
                 history::MENU_ITEM_EDIT_COMMENT => open_comment_modal(state),
@@ -1185,7 +1131,7 @@ fn draw(area: Rect, f: &mut ratatui::Frame, state: &mut UiState) {
         Line::from("Dashboard"),
         Line::from("History"),
     ];
-    if state.traceroute_enabled {
+    if state.diagnostics.traceroute_enabled {
         tab_titles.push(Line::from("Traceroute"));
     }
     tab_titles.push(Line::from("Charts"));
@@ -1208,23 +1154,23 @@ fn draw(area: Rect, f: &mut ratatui::Frame, state: &mut UiState) {
     .highlight_style(Style::default().fg(Color::Yellow));
     f.render_widget(tabs, chunks[0]);
 
-    let traceroute_idx: Option<usize> = if state.traceroute_enabled { Some(2) } else { None };
-    let charts_idx: usize = if state.traceroute_enabled { 3 } else { 2 };
+    let traceroute_idx: Option<usize> = if state.diagnostics.traceroute_enabled { Some(2) } else { None };
+    let charts_idx: usize = if state.diagnostics.traceroute_enabled { 3 } else { 2 };
 
     match state.tab {
         0 => draw_dashboard(chunks[1], f, state),
         1 => {
-            if state.history_detail_view {
+            if state.history.detail_view {
                 draw_history_detail(chunks[1], f, &mut *state)
             } else {
                 show_history(chunks[1], f, &mut *state);
-                if state.history_menu_open {
+                if state.history.menu_open {
                     draw_history_menu(chunks[1], f, &*state);
                 }
-                if state.history_export_modal_open {
+                if state.history.export_modal_open {
                     draw_history_export_modal(chunks[1], f, &*state);
                 }
-                if state.history_comment_modal_open {
+                if state.history.comment_modal_open {
                     draw_history_comment_modal(chunks[1], f, &*state);
                 }
             }
