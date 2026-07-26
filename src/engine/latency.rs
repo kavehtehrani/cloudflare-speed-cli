@@ -7,6 +7,7 @@ use std::sync::{atomic::AtomicBool, Arc};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_latency_probes(
     client: &CloudflareClient,
     phase: Phase,

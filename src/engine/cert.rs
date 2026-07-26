@@ -108,10 +108,7 @@ fn parse_pem_certificates(input: &str) -> Result<Vec<Vec<u8>>> {
             body.push_str(trimmed);
         }
         if !found_end {
-            return Err(anyhow::anyhow!(
-                "PEM block missing '{}' marker",
-                END
-            ));
+            return Err(anyhow::anyhow!("PEM block missing '{}' marker", END));
         }
 
         let der = base64::engine::general_purpose::STANDARD
@@ -121,10 +118,7 @@ fn parse_pem_certificates(input: &str) -> Result<Vec<Vec<u8>>> {
     }
 
     if certs.is_empty() {
-        return Err(anyhow::anyhow!(
-            "no '{}' blocks found in PEM input",
-            BEGIN
-        ));
+        return Err(anyhow::anyhow!("no '{}' blocks found in PEM input", BEGIN));
     }
 
     Ok(certs)

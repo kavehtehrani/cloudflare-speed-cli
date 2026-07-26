@@ -97,7 +97,6 @@ impl CloudflareClient {
         self.base_url.join("/__up").expect("join __up")
     }
 
-
     pub async fn probe_latency_ms(
         &self,
         during: Option<&str>,

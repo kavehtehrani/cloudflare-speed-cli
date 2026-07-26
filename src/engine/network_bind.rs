@@ -95,7 +95,6 @@ pub async fn resolve_addrs_for_family(
     Ok(addrs)
 }
 
-
 /// Apply local address binding to a reqwest client builder.
 /// If `bind_ip` is Some, binds the client to that local address.
 pub fn apply_local_address(builder: ClientBuilder, bind_ip: Option<IpAddr>) -> ClientBuilder {
@@ -374,7 +373,12 @@ mod tests {
             Some(v4)
         );
         assert_eq!(
-            select_source_ip(Some(IpFamily::V6), Some(v4), Some(global_v6), Some(link_local)),
+            select_source_ip(
+                Some(IpFamily::V6),
+                Some(v4),
+                Some(global_v6),
+                Some(link_local)
+            ),
             Some(global_v6)
         );
     }

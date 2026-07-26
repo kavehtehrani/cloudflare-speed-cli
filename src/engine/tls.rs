@@ -82,10 +82,13 @@ pub async fn measure_tls_handshake(
 
     // Time only the TLS handshake
     let start = Instant::now();
-    let tls_stream = timeout(HANDSHAKE_TIMEOUT, connector.connect(server_name, tcp_stream))
-        .await
-        .with_context(|| format!("TLS handshake timed out after {:?}", HANDSHAKE_TIMEOUT))?
-        .with_context(|| format!("TLS handshake failed with {}", hostname))?;
+    let tls_stream = timeout(
+        HANDSHAKE_TIMEOUT,
+        connector.connect(server_name, tcp_stream),
+    )
+    .await
+    .with_context(|| format!("TLS handshake timed out after {:?}", HANDSHAKE_TIMEOUT))?
+    .with_context(|| format!("TLS handshake failed with {}", hostname))?;
     let handshake_time = start.elapsed();
 
     // Extract TLS session info
@@ -128,7 +131,11 @@ async fn connect_tcp(
     // Filter by the requested family if set; otherwise try all. `family`
     // already incorporates the bind IP's family, so binding stays consistent.
     let candidates: Vec<SocketAddr> = match family {
-        Some(f) => resolved.iter().copied().filter(|a| f.matches(a.ip())).collect(),
+        Some(f) => resolved
+            .iter()
+            .copied()
+            .filter(|a| f.matches(a.ip()))
+            .collect(),
         None => resolved.clone(),
     };
 
@@ -165,7 +172,8 @@ async fn connect_tcp(
         // source per family); elsewhere the interface was already resolved to
         // `bind_ip` above, so this is a no-op.
         if let Some(iface) = interface {
-            if let Err(e) = super::network_bind::bind_socket_to_device(&socket, iface, addr.is_ipv6())
+            if let Err(e) =
+                super::network_bind::bind_socket_to_device(&socket, iface, addr.is_ipv6())
             {
                 last_err =
                     Some(anyhow!(e).context(format!("failed to bind to interface {}", iface)));
@@ -175,7 +183,9 @@ async fn connect_tcp(
 
         match timeout(CONNECT_TIMEOUT, socket.connect(addr)).await {
             Ok(Ok(stream)) => return Ok(stream),
-            Ok(Err(e)) => last_err = Some(anyhow!(e).context(format!("connect to {} failed", addr))),
+            Ok(Err(e)) => {
+                last_err = Some(anyhow!(e).context(format!("connect to {} failed", addr)))
+            }
             Err(_) => {
                 last_err = Some(anyhow!(
                     "connect to {} timed out after {:?}",

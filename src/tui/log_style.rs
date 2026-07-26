@@ -74,12 +74,7 @@ fn highlight_numbers(s: &str, mbps_color: Color) -> Vec<Span<'static>> {
             // Identifier continuation: previous char in `buf` is a letter or
             // underscore. Absorb the digit run (incl. dots/underscores so we
             // keep "TLSv1_3" together) into the text buffer.
-            if buf
-                .chars()
-                .last()
-                .map(is_ident_char)
-                .unwrap_or(false)
-            {
+            if buf.chars().last().map(is_ident_char).unwrap_or(false) {
                 while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
                     buf.push(chars[i]);
                     i += 1;
@@ -164,7 +159,13 @@ fn recognised_unit(rest: &str, mbps_color: Color) -> Option<(&'static str, usize
         ("%", "%", 1, PERCENT, false),
     ];
     for (prefix, unit, len, color, with_space) in cases.iter() {
-        if rest.starts_with(prefix) && !rest[prefix.len()..].chars().next().map(is_ident_char).unwrap_or(false) {
+        if rest.starts_with(prefix)
+            && !rest[prefix.len()..]
+                .chars()
+                .next()
+                .map(is_ident_char)
+                .unwrap_or(false)
+        {
             return Some((*unit, *len, *color, *with_space));
         }
     }
@@ -240,7 +241,10 @@ mod tests {
     #[test]
     fn still_highlights_standalone_metrics() {
         let line = "Download: 282.34 Mbps";
-        assert_eq!(highlighted_substrings(line), vec!["282.34 Mbps".to_string()]);
+        assert_eq!(
+            highlighted_substrings(line),
+            vec!["282.34 Mbps".to_string()]
+        );
 
         let line = "Packet loss probe: 50/100 recv 48 loss 4.0% (12.1ms)";
         let hl = highlighted_substrings(line);

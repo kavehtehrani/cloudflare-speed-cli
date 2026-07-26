@@ -256,7 +256,10 @@ pub fn format_result_summary(
 
     if let Some(ref cq) = result.connection_quality {
         if let Some(ms) = cq.bufferbloat_ms {
-            out.push(format!("Bufferbloat: {} ({:.0}ms)", cq.bufferbloat_grade, ms));
+            out.push(format!(
+                "Bufferbloat: {} ({:.0}ms)",
+                cq.bufferbloat_grade, ms
+            ));
         }
         if let Some(cv) = cq.stability_cv_pct {
             let mut detail = format!("CV {:.1}%", cv);
@@ -299,7 +302,9 @@ mod tests {
         });
         let out = format_result_summary(&r, &[], &[], &[], &[], &[]);
         assert!(out.iter().any(|l| l == "Bufferbloat: B (47ms)"));
-        assert!(out.iter().any(|l| l == "Stability: A (CV 3.8%, DL 3.1%, UL 3.8%)"));
+        assert!(out
+            .iter()
+            .any(|l| l == "Stability: A (CV 3.8%, DL 3.1%, UL 3.8%)"));
     }
 
     #[test]
