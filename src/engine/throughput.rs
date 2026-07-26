@@ -51,23 +51,35 @@ fn throughput_summary(bytes: u64, duration: Duration, mbps_samples: &[f64]) -> T
     }
 }
 
-fn estimate_steady_window(
-    samples: &[(Instant, u64)],
+/// Steady-state view of a phase: excludes the ramp-up (the first
+/// `STEADY_STATE_RAMP_FRACTION` of the phase, at least `STEADY_STATE_MIN_RAMP`)
+/// from the byte counters AND the per-tick rate samples, so slow start does
+/// not drag the reported throughput down. `samples[i]` is (active time at
+/// tick i, cumulative bytes at tick i); `mbps_samples[i]` is the rate over
+/// the interval ending at tick i. Returns `None` when there is no usable
+/// steady window (caller falls back to the whole phase).
+fn steady_state_view<'a>(
+    samples: &[(Duration, u64)],
+    mbps_samples: &'a [f64],
     total_duration: Duration,
-) -> Option<(u64, Duration)> {
+) -> Option<(u64, Duration, &'a [f64])> {
     if samples.len() < 2 {
         return None;
     }
-    let ignore = total_duration.mul_f64(0.20).max(Duration::from_secs(1));
-    let t0 = samples[0].0 + ignore;
-    let start_idx = samples.iter().position(|(t, _)| *t >= t0).unwrap_or(0);
+    let ramp = total_duration
+        .mul_f64(crate::constants::STEADY_STATE_RAMP_FRACTION)
+        .max(crate::constants::STEADY_STATE_MIN_RAMP);
+    let start_idx = samples.iter().position(|(t, _)| *t >= ramp)?;
     let (t_start, b_start) = samples[start_idx];
     let (t_end, b_end) = *samples.last().unwrap();
-    let dt = t_end.saturating_duration_since(t_start);
-    if dt < THROUGHPUT_SAMPLE_INTERVAL {
+    let window = t_end.saturating_sub(t_start);
+    if window < THROUGHPUT_SAMPLE_INTERVAL {
         return None;
     }
-    Some((b_end.saturating_sub(b_start), dt))
+    // mbps_samples[i] covers the interval ending at samples[i]; the intervals
+    // fully inside the window start at start_idx + 1.
+    let steady = &mbps_samples[(start_idx + 1).min(mbps_samples.len())..];
+    Some((b_end.saturating_sub(b_start), window, steady))
 }
 
 pub async fn run_download_with_loaded_latency(
@@ -77,6 +89,13 @@ pub async fn run_download_with_loaded_latency(
     paused: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
 ) -> Result<(ThroughputSummary, LatencySummary)> {
+    // A cancel that arrived before this phase: don't spawn workers at all.
+    if cancel.load(Ordering::Relaxed) {
+        return Ok((
+            throughput_summary(0, Duration::ZERO, &[]),
+            LatencySummary::failed(),
+        ));
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let total = Arc::new(AtomicU64::new(0));
     let errors = Arc::new(AtomicU64::new(0));
@@ -90,10 +109,17 @@ pub async fn run_download_with_loaded_latency(
         let stop2 = stop.clone();
         let total2 = total.clone();
         let errors2 = errors.clone();
+        let paused_w = paused.clone();
         let ev_dl = event_tx.clone();
 
         handles.push(tokio::spawn(async move {
             while !stop2.load(Ordering::Relaxed) {
+                // Paused means paused: stop pulling bytes so the link is
+                // actually idle, not just unsampled.
+                if paused_w.load(Ordering::Relaxed) {
+                    tokio::time::sleep(crate::constants::PAUSE_POLL_INTERVAL).await;
+                    continue;
+                }
                 let mut url = base_url.clone();
                 url.query_pairs_mut()
                     .append_pair("measId", &meas_id)
@@ -103,6 +129,7 @@ pub async fn run_download_with_loaded_latency(
                     Ok(r) => r,
                     Err(_) => {
                         errors2.fetch_add(1, Ordering::Relaxed);
+                        tokio::time::sleep(crate::constants::WORKER_ERROR_BACKOFF).await;
                         continue;
                     }
                 };
@@ -123,7 +150,7 @@ pub async fn run_download_with_loaded_latency(
                                 .await;
                         }
                     }
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    tokio::time::sleep(crate::constants::WORKER_ERROR_BACKOFF).await;
                     continue;
                 }
 
@@ -131,7 +158,7 @@ pub async fn run_download_with_loaded_latency(
                 while let Some(chunk) = stream.next().await {
                     let Ok(b) = chunk else { break };
                     total2.fetch_add(b.len() as u64, Ordering::Relaxed);
-                    if stop2.load(Ordering::Relaxed) {
+                    if stop2.load(Ordering::Relaxed) || paused_w.load(Ordering::Relaxed) {
                         break;
                     }
                 }
@@ -163,27 +190,35 @@ pub async fn run_download_with_loaded_latency(
         let _ = lat_tx.send(res).await;
     });
 
-    let start = Instant::now();
+    // The phase clock counts ACTIVE time only, so a pause neither eats the
+    // remaining duration nor leaks into any rate sample.
+    let mut active = Duration::ZERO;
     let mut last_bytes = 0u64;
-    let mut last_t = Instant::now();
-    let mut samples: Vec<(Instant, u64)> = Vec::with_capacity(256);
+    let mut samples: Vec<(Duration, u64)> = Vec::with_capacity(256);
     let mut mbps_samples: Vec<f64> = Vec::with_capacity(256);
 
-    while start.elapsed() < cfg.download_duration {
+    while active < cfg.download_duration {
+        let was_paused = paused.load(Ordering::Relaxed);
         if wait_if_paused_or_cancelled(&paused, &cancel).await {
             break;
         }
+        if was_paused {
+            // Just resumed: restart the rate baseline so no sample spans the pause.
+            last_bytes = total.load(Ordering::Relaxed);
+        }
 
+        let tick_start = Instant::now();
         tokio::time::sleep(THROUGHPUT_SAMPLE_INTERVAL).await;
+        let tick_len = tick_start.elapsed();
+        active += tick_len;
 
         let now_total = total.load(Ordering::Relaxed);
-        let dt = last_t.elapsed().as_secs_f64().max(1e-9);
+        let dt = tick_len.as_secs_f64().max(1e-9);
         let dbytes = now_total.saturating_sub(last_bytes);
         let bps_instant = (dbytes as f64) / dt;
         let mbps_instant = (bps_instant * 8.0) / 1_000_000.0;
-        last_t = Instant::now();
         last_bytes = now_total;
-        samples.push((Instant::now(), now_total));
+        samples.push((active, now_total));
         mbps_samples.push(mbps_instant);
 
         event_tx
@@ -201,7 +236,7 @@ pub async fn run_download_with_loaded_latency(
         let _ = h.await;
     }
 
-    let duration = start.elapsed();
+    let duration = active;
     let bytes_total = total.load(Ordering::Relaxed);
     let error_count = errors.load(Ordering::Relaxed);
     if error_count > 0 {
@@ -212,9 +247,9 @@ pub async fn run_download_with_loaded_latency(
             .await
             .ok();
     }
-    let (bytes, window) =
-        estimate_steady_window(&samples, duration).unwrap_or((bytes_total, duration));
-    let dl = throughput_summary(bytes, window, &mbps_samples);
+    let (bytes, window, steady_mbps) = steady_state_view(&samples, &mbps_samples, duration)
+        .unwrap_or((bytes_total, duration, &mbps_samples[..]));
+    let dl = throughput_summary(bytes, window, steady_mbps);
 
     // Wait for latency results with a timeout to prevent indefinite hangs
     let loaded_latency = tokio::time::timeout(Duration::from_secs(30), lat_rx.recv())
@@ -235,6 +270,13 @@ pub async fn run_upload_with_loaded_latency(
     paused: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
 ) -> Result<(ThroughputSummary, LatencySummary)> {
+    // A cancel that arrived before this phase: don't spawn workers at all.
+    if cancel.load(Ordering::Relaxed) {
+        return Ok((
+            throughput_summary(0, Duration::ZERO, &[]),
+            LatencySummary::failed(),
+        ));
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let total = Arc::new(AtomicU64::new(0));
     let errors = Arc::new(AtomicU64::new(0));
@@ -247,10 +289,17 @@ pub async fn run_upload_with_loaded_latency(
         let stop2 = stop.clone();
         let total2 = total.clone();
         let errors2 = errors.clone();
+        let paused_w = paused.clone();
         let bytes_per_req = cfg.upload_bytes_per_req;
 
         handles.push(tokio::spawn(async move {
             while !stop2.load(Ordering::Relaxed) {
+                // Paused means paused: stop pushing bytes so the link is
+                // actually idle, not just unsampled.
+                if paused_w.load(Ordering::Relaxed) {
+                    tokio::time::sleep(crate::constants::PAUSE_POLL_INTERVAL).await;
+                    continue;
+                }
                 // Count bytes as the HTTP client pulls chunks from the stream
                 // (backpressure-aware). On failure, subtract what we counted so
                 // the live chart stays smooth without permanently over-reporting.
@@ -284,12 +333,28 @@ pub async fn run_upload_with_loaded_latency(
                 };
 
                 let body = reqwest::Body::wrap_stream(body_stream);
-                match http.post(url.clone()).body(body).send().await {
-                    Ok(resp) if resp.status().is_success() => {}
-                    _ => {
+                // Abort the in-flight request the moment a pause lands, so
+                // "paused" doesn't keep saturating the uplink for a whole body.
+                let pause_hit = async {
+                    while !paused_w.load(Ordering::Relaxed) {
+                        tokio::time::sleep(crate::constants::PAUSE_POLL_INTERVAL).await;
+                    }
+                };
+                tokio::select! {
+                    res = http.post(url.clone()).body(body).send() => {
+                        match res {
+                            Ok(resp) if resp.status().is_success() => {}
+                            _ => {
+                                let rolled_back = counted.load(Ordering::Relaxed);
+                                total2.fetch_sub(rolled_back, Ordering::Relaxed);
+                                errors2.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    _ = pause_hit => {
+                        // Dropped mid-request: those bytes never fully arrived.
                         let rolled_back = counted.load(Ordering::Relaxed);
                         total2.fetch_sub(rolled_back, Ordering::Relaxed);
-                        errors2.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
@@ -320,27 +385,33 @@ pub async fn run_upload_with_loaded_latency(
         let _ = lat_tx.send(res).await;
     });
 
-    let start = Instant::now();
+    // Active-time phase clock; see the download loop for the pause semantics.
+    let mut active = Duration::ZERO;
     let mut last_bytes = 0u64;
-    let mut last_t = Instant::now();
-    let mut samples: Vec<(Instant, u64)> = Vec::with_capacity(256);
+    let mut samples: Vec<(Duration, u64)> = Vec::with_capacity(256);
     let mut mbps_samples: Vec<f64> = Vec::with_capacity(256);
 
-    while start.elapsed() < cfg.upload_duration {
+    while active < cfg.upload_duration {
+        let was_paused = paused.load(Ordering::Relaxed);
         if wait_if_paused_or_cancelled(&paused, &cancel).await {
             break;
         }
+        if was_paused {
+            last_bytes = total.load(Ordering::Relaxed);
+        }
 
+        let tick_start = Instant::now();
         tokio::time::sleep(THROUGHPUT_SAMPLE_INTERVAL).await;
+        let tick_len = tick_start.elapsed();
+        active += tick_len;
 
         let now_total = total.load(Ordering::Relaxed);
-        let dt = last_t.elapsed().as_secs_f64().max(1e-9);
+        let dt = tick_len.as_secs_f64().max(1e-9);
         let dbytes = now_total.saturating_sub(last_bytes);
         let bps_instant = (dbytes as f64) / dt;
         let mbps_instant = (bps_instant * 8.0) / 1_000_000.0;
-        last_t = Instant::now();
         last_bytes = now_total;
-        samples.push((Instant::now(), now_total));
+        samples.push((active, now_total));
         mbps_samples.push(mbps_instant);
 
         event_tx
@@ -368,7 +439,7 @@ pub async fn run_upload_with_loaded_latency(
         let _ = h.await;
     }
 
-    let duration = start.elapsed();
+    let duration = active;
     let bytes_total = total.load(Ordering::Relaxed);
     let error_count = errors.load(Ordering::Relaxed);
     if error_count > 0 {
@@ -379,9 +450,9 @@ pub async fn run_upload_with_loaded_latency(
             .await
             .ok();
     }
-    let (bytes, window) =
-        estimate_steady_window(&samples, duration).unwrap_or((bytes_total, duration));
-    let up = throughput_summary(bytes, window, &mbps_samples);
+    let (bytes, window, steady_mbps) = steady_state_view(&samples, &mbps_samples, duration)
+        .unwrap_or((bytes_total, duration, &mbps_samples[..]));
+    let up = throughput_summary(bytes, window, steady_mbps);
 
     // Wait for latency results with a timeout to prevent indefinite hangs
     let loaded_latency = tokio::time::timeout(Duration::from_secs(30), lat_rx.recv())
@@ -393,4 +464,65 @@ pub async fn run_upload_with_loaded_latency(
     let _ = lat_handle.await;
 
     Ok((up, loaded_latency))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn secs(s: u64) -> Duration {
+        Duration::from_secs(s)
+    }
+
+    /// Ten 1s ticks: bytes crawl for the first two ticks (ramp), then advance
+    /// a steady 100 bytes/tick. `mbps[i]` is the rate of the interval ending
+    /// at tick i.
+    fn ramp_fixture() -> (Vec<(Duration, u64)>, Vec<f64>) {
+        let bytes = [5u64, 30, 130, 230, 330, 430, 530, 630, 730, 830];
+        let samples: Vec<(Duration, u64)> = bytes
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (secs(i as u64 + 1), *b))
+            .collect();
+        let mut mbps = vec![0.04, 0.2];
+        mbps.extend(std::iter::repeat_n(0.8, 8));
+        (samples, mbps)
+    }
+
+    #[test]
+    fn steady_state_view_excludes_ramp_up() {
+        let (samples, mbps) = ramp_fixture();
+        // 10s phase: ramp = max(20% x 10s, 1s) = 2s, so steady starts at the
+        // first tick at/after t=2s (index 1).
+        let (bytes, window, steady) = steady_state_view(&samples, &mbps, secs(10)).unwrap();
+        assert_eq!(bytes, 830 - 30);
+        assert_eq!(window, secs(8));
+        assert_eq!(steady, &mbps[2..]);
+    }
+
+    #[test]
+    fn steady_state_view_none_when_too_short() {
+        assert!(steady_state_view(&[], &[], secs(10)).is_none());
+        assert!(steady_state_view(&[(secs(1), 100)], &[0.8], secs(1)).is_none());
+        // Every tick still inside the ramp: nothing steady to report.
+        let samples = vec![
+            (Duration::from_millis(200), 10),
+            (Duration::from_millis(400), 20),
+        ];
+        assert!(steady_state_view(&samples, &[0.4, 0.4], secs(10)).is_none());
+    }
+
+    #[test]
+    fn throughput_summary_uses_sample_percentiles() {
+        let s = throughput_summary(1000, secs(1), &[8.0, 8.0, 8.0, 8.0, 8.0]);
+        assert!((s.mbps - 8.0).abs() < 1e-9);
+        assert_eq!(s.bytes, 1000);
+    }
+
+    #[test]
+    fn throughput_summary_falls_back_to_bytes_over_duration() {
+        // 1_000_000 bytes in 1s = 8 Mbps
+        let s = throughput_summary(1_000_000, secs(1), &[]);
+        assert!((s.mbps - 8.0).abs() < 1e-6);
+    }
 }

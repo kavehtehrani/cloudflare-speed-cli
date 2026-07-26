@@ -110,10 +110,11 @@ impl TestEngine {
 
         // Final fallback to response headers
         if meta.is_none() {
-            meta = tokio::time::timeout(meta_timeout, cloudflare::fetch_meta_from_response(&client))
-                .await
-                .ok()
-                .and_then(Result::ok);
+            meta =
+                tokio::time::timeout(meta_timeout, cloudflare::fetch_meta_from_response(&client))
+                    .await
+                    .ok()
+                    .and_then(Result::ok);
         }
 
         let locations =
@@ -164,7 +165,7 @@ impl TestEngine {
         let mut external_ipv6: Option<String> = None;
 
         // DNS Resolution measurement
-        if self.cfg.measure_dns {
+        if self.cfg.measure_dns && !cancel.load(Ordering::Relaxed) {
             if let Some(hostname) = dns::extract_hostname(&self.cfg.base_url) {
                 event_tx
                     .send(TestEvent::Info {
@@ -196,7 +197,7 @@ impl TestEngine {
         }
 
         // TLS Handshake measurement
-        if self.cfg.measure_tls {
+        if self.cfg.measure_tls && !cancel.load(Ordering::Relaxed) {
             if let Some((hostname, port)) = tls::extract_host_port(&self.cfg.base_url) {
                 event_tx
                     .send(TestEvent::Info {
@@ -237,7 +238,7 @@ impl TestEngine {
         }
 
         // Fetch external IPs (runs in parallel, part of default diagnostics)
-        if self.cfg.measure_dns {
+        if self.cfg.measure_dns && !cancel.load(Ordering::Relaxed) {
             let (v4, v6) = dns::fetch_external_ips(
                 &self.cfg.base_url,
                 self.cfg.interface.as_deref(),
@@ -255,7 +256,7 @@ impl TestEngine {
         }
 
         // IPv4 vs IPv6 comparison
-        if self.cfg.compare_ip_versions {
+        if self.cfg.compare_ip_versions && !cancel.load(Ordering::Relaxed) {
             event_tx
                 .send(TestEvent::Info {
                     message: "Comparing IPv4 vs IPv6 performance...".to_string(),
@@ -270,6 +271,7 @@ impl TestEngine {
                 self.cfg.resolved_bind_ip,
                 self.cfg.certificate_path.as_deref(),
                 family,
+                &cancel,
             )
             .await
             {
@@ -294,7 +296,7 @@ impl TestEngine {
         }
 
         // Traceroute
-        if self.cfg.traceroute {
+        if self.cfg.traceroute && !cancel.load(Ordering::Relaxed) {
             if let Some(hostname) = dns::extract_hostname(&self.cfg.base_url) {
                 event_tx
                     .send(TestEvent::Info {
@@ -313,6 +315,7 @@ impl TestEngine {
                     self.cfg.resolved_bind_ip,
                     self.cfg.interface.as_deref(),
                     family,
+                    cancel.clone(),
                 )
                 .await
                 {
@@ -414,19 +417,25 @@ impl TestEngine {
         // Use prefetched DNS if available (empty Vec means resolve inline)
         let pre_resolved: Vec<std::net::SocketAddr> = stun_dns_handle.await.unwrap_or_default();
 
-        match turn_udp::run_udp_like_loss_probe(&info, &self.cfg, &event_tx, pre_resolved, family)
+        if !cancel.load(Ordering::Relaxed) {
+            match turn_udp::run_udp_like_loss_probe(
+                &info,
+                &self.cfg,
+                &event_tx,
+                pre_resolved,
+                family,
+                &cancel,
+            )
             .await
-        {
-            Ok(udp) => {
-                experimental_udp = Some(udp);
-            }
-            Err(e) => {
-                let msg = format!("UDP probe failed: {e:#}");
-                udp_error = Some(msg.clone());
-                event_tx
-                    .send(TestEvent::Info { message: msg })
-                    .await
-                    .ok();
+            {
+                Ok(udp) => {
+                    experimental_udp = Some(udp);
+                }
+                Err(e) => {
+                    let msg = format!("UDP probe failed: {e:#}");
+                    udp_error = Some(msg.clone());
+                    event_tx.send(TestEvent::Info { message: msg }).await.ok();
+                }
             }
         }
 

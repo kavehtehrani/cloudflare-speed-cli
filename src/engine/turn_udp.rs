@@ -5,7 +5,8 @@ use anyhow::{anyhow, Context, Result};
 use rand::RngCore;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -81,19 +82,23 @@ fn build_stun_binding_request(txid: [u8; 12]) -> [u8; 20] {
     b
 }
 
-fn is_stun_binding_response(buf: &[u8], txid: [u8; 12]) -> bool {
+/// When `buf` is a STUN binding success response whose transaction id belongs
+/// to a probe we sent, returns that probe's sequence number.
+fn match_binding_response(buf: &[u8], txid_to_seq: &HashMap<[u8; 12], u64>) -> Option<u64> {
     if buf.len() < 20 {
-        return false;
+        return None;
     }
     // binding success response
     if buf[0] != 0x01 || buf[1] != 0x01 {
-        return false;
+        return None;
     }
     // magic cookie
     if buf[4] != 0x21 || buf[5] != 0x12 || buf[6] != 0xA4 || buf[7] != 0x42 {
-        return false;
+        return None;
     }
-    buf[8..20] == txid
+    let mut txid = [0u8; 12];
+    txid.copy_from_slice(&buf[8..20]);
+    txid_to_seq.get(&txid).copied()
 }
 
 fn pick_stun_target(turn: &TurnInfo) -> Option<String> {
@@ -135,12 +140,39 @@ fn parse_host_port(url: &str) -> Result<(String, u16)> {
     Ok((host.to_string(), port))
 }
 
+/// Tracks probe-response arrivals for the loss/reorder metrics: dedupes
+/// duplicate responses per sequence number and counts an arrival as
+/// out-of-order when an earlier-sequenced probe lands after a
+/// later-sequenced one already has.
+#[derive(Default)]
+struct ArrivalTracker {
+    arrived: std::collections::HashSet<u64>,
+    max_arrived_seq: u64,
+    out_of_order: u64,
+}
+
+impl ArrivalTracker {
+    /// Records an arrival; returns false for duplicates.
+    fn record(&mut self, seq: u64) -> bool {
+        if !self.arrived.insert(seq) {
+            return false;
+        }
+        if seq < self.max_arrived_seq {
+            self.out_of_order += 1;
+        } else {
+            self.max_arrived_seq = seq;
+        }
+        true
+    }
+}
+
 pub async fn run_udp_like_loss_probe(
     turn: &TurnInfo,
     cfg: &RunConfig,
     event_tx: &mpsc::Sender<TestEvent>,
     pre_resolved: Vec<SocketAddr>,
     family: Option<IpFamily>,
+    cancel: &AtomicBool,
 ) -> Result<ExperimentalUdpSummary> {
     let target_url = pick_stun_target(turn).context("no stun/turn url in /__turn")?;
     let (host, port) = parse_host_port(&target_url)?;
@@ -163,7 +195,11 @@ pub async fn run_udp_like_loss_probe(
     // a UDP socket bound to a v4 source can't connect() to a v6 peer
     // (EAFNOSUPPORT) and vice versa.
     let candidates: Vec<SocketAddr> = match family {
-        Some(f) => resolved.iter().copied().filter(|a| f.matches(a.ip())).collect(),
+        Some(f) => resolved
+            .iter()
+            .copied()
+            .filter(|a| f.matches(a.ip()))
+            .collect(),
         None => resolved,
     };
 
@@ -177,8 +213,8 @@ pub async fn run_udp_like_loss_probe(
 
     let (sock, _addr) = bind_and_connect_udp(&candidates, cfg).await?;
 
-    let timeout = Duration::from_millis(600);
-    let interval = Duration::from_millis(80);
+    let timeout = crate::constants::UDP_PROBE_TIMEOUT;
+    let interval = crate::constants::UDP_PROBE_INTERVAL;
     let attempts = cfg.udp_packets;
 
     let mut sent = 0u64;
@@ -186,12 +222,14 @@ pub async fn run_udp_like_loss_probe(
     let mut samples = Vec::<f64>::new();
     let mut online = OnlineStats::default();
 
-    // Out-of-order tracking: map transaction ID to sequence number
     let mut txid_to_seq: HashMap<[u8; 12], u64> = HashMap::new();
-    let mut next_expected_seq: u64 = 1;
-    let mut out_of_order: u64 = 0;
+    let mut send_times: HashMap<u64, Instant> = HashMap::new();
+    let mut tracker = ArrivalTracker::default();
 
     for seq in 1..=attempts {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         sent += 1;
 
         let mut txid = [0u8; 12];
@@ -199,54 +237,74 @@ pub async fn run_udp_like_loss_probe(
         txid_to_seq.insert(txid, seq);
         let pkt = build_stun_binding_request(txid);
 
-        let start = std::time::Instant::now();
+        let start = Instant::now();
+        send_times.insert(seq, start);
         let _ = sock.send(&pkt).await;
 
+        // Read until this probe's deadline. A delayed response to an EARLIER
+        // probe must not consume this slot (that would record two losses for
+        // one late packet): credit it to its own sequence and keep waiting.
+        let deadline = start + timeout;
+        let mut got_current = false;
         let mut buf = [0u8; 1500];
-        let recv = tokio::time::timeout(timeout, sock.recv(&mut buf)).await;
-        match recv {
-            Ok(Ok(n)) if is_stun_binding_response(&buf[..n], txid) => {
-                received += 1;
-                let ms = start.elapsed().as_secs_f64() * 1000.0;
-                samples.push(ms);
-                online.push(ms);
-
-                // Check for out-of-order: if this packet's seq < expected, it's reordered
-                if let Some(&pkt_seq) = txid_to_seq.get(&txid) {
-                    if pkt_seq < next_expected_seq {
-                        out_of_order += 1;
-                    } else {
-                        // Update expected to next after this one
-                        next_expected_seq = pkt_seq + 1;
+        loop {
+            let now = Instant::now();
+            let Some(remaining) = deadline.checked_duration_since(now) else {
+                break;
+            };
+            match tokio::time::timeout(remaining, sock.recv(&mut buf)).await {
+                Ok(Ok(n)) => {
+                    let Some(rx_seq) = match_binding_response(&buf[..n], &txid_to_seq) else {
+                        continue; // unrelated datagram
+                    };
+                    if !tracker.record(rx_seq) {
+                        continue; // duplicate response
+                    }
+                    received += 1;
+                    let rtt_ms = send_times
+                        .get(&rx_seq)
+                        .map(|t0| t0.elapsed().as_secs_f64() * 1000.0);
+                    if let Some(ms) = rtt_ms {
+                        samples.push(ms);
+                        online.push(ms);
+                    }
+                    if rx_seq == seq {
+                        got_current = true;
+                    }
+                    event_tx
+                        .send(TestEvent::UdpLossProgress {
+                            sent,
+                            received,
+                            total: attempts,
+                            rtt_ms,
+                        })
+                        .await
+                        .ok();
+                    if got_current {
+                        break;
                     }
                 }
+                // Socket error or deadline elapsed.
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
 
-                event_tx
-                    .send(TestEvent::UdpLossProgress {
-                        sent,
-                        received,
-                        total: attempts,
-                        rtt_ms: Some(ms),
-                    })
-                    .await
-                    .ok();
-            }
-            _ => {
-                // loss/timeout
-                event_tx
-                    .send(TestEvent::UdpLossProgress {
-                        sent,
-                        received,
-                        total: attempts,
-                        rtt_ms: None,
-                    })
-                    .await
-                    .ok();
-            }
+        if !got_current {
+            event_tx
+                .send(TestEvent::UdpLossProgress {
+                    sent,
+                    received,
+                    total: attempts,
+                    rtt_ms: None,
+                })
+                .await
+                .ok();
         }
 
         tokio::time::sleep(interval).await;
     }
+
+    let out_of_order = tracker.out_of_order;
 
     let latency = latency_summary_from_samples(sent, received, &samples, online.stddev());
 
@@ -334,7 +392,11 @@ fn build_udp_socket(
         socket.bind(&socket2::SockAddr::from(addr))?;
         socket.into()
     } else {
-        let any = if target.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+        let any = if target.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
         std::net::UdpSocket::bind(any)?
     };
 
@@ -370,5 +432,31 @@ mod tests {
     fn calculate_mos_rejects_invalid_inputs() {
         assert!(calculate_mos(f64::NAN, 1.0, 0.0).is_none());
         assert!(calculate_mos(-1.0, 1.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn arrival_tracker_in_order_arrivals_are_not_reordered() {
+        let mut t = ArrivalTracker::default();
+        assert!(t.record(1));
+        assert!(t.record(2));
+        assert!(t.record(3));
+        assert_eq!(t.out_of_order, 0);
+    }
+
+    #[test]
+    fn arrival_tracker_counts_reordered_arrival() {
+        let mut t = ArrivalTracker::default();
+        t.record(1);
+        t.record(3);
+        t.record(2); // lands after 3 already arrived: reordered
+        assert_eq!(t.out_of_order, 1);
+    }
+
+    #[test]
+    fn arrival_tracker_ignores_duplicate_responses() {
+        let mut t = ArrivalTracker::default();
+        assert!(t.record(1));
+        assert!(!t.record(1));
+        assert_eq!(t.out_of_order, 0);
     }
 }

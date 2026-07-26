@@ -7,6 +7,7 @@ use crate::model::{IpVersionComparison, IpVersionResult};
 use anyhow::Result;
 use reqwest::Url;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::net::lookup_host;
 
@@ -24,6 +25,7 @@ pub async fn compare_ip_versions(
     bind_ip: Option<IpAddr>,
     cert_path: Option<&std::path::Path>,
     family: Option<IpFamily>,
+    cancel: &AtomicBool,
 ) -> Result<IpVersionComparison> {
     let url = Url::parse(base_url)?;
     let hostname = url
@@ -56,19 +58,29 @@ pub async fn compare_ip_versions(
     let test_v6 = family != Some(IpFamily::V4);
 
     // Test IPv4
-    let ipv4_result = Some(if !test_v4 {
+    let ipv4_result = Some(if cancel.load(Ordering::Relaxed) {
+        unavailable_result("Cancelled")
+    } else if !test_v4 {
         skipped_result(family)
     } else if let Some(ip) = ipv4_addr {
-        test_ip_version(base_url, hostname, port, ip, user_agent, interface, bind_ip, cert_path).await
+        test_ip_version(
+            base_url, hostname, port, ip, user_agent, interface, bind_ip, cert_path, cancel,
+        )
+        .await
     } else {
         unavailable_result("No IPv4 address resolved")
     });
 
     // Test IPv6
-    let ipv6_result = Some(if !test_v6 {
+    let ipv6_result = Some(if cancel.load(Ordering::Relaxed) {
+        unavailable_result("Cancelled")
+    } else if !test_v6 {
         skipped_result(family)
     } else if let Some(ip) = ipv6_addr {
-        test_ip_version(base_url, hostname, port, ip, user_agent, interface, bind_ip, cert_path).await
+        test_ip_version(
+            base_url, hostname, port, ip, user_agent, interface, bind_ip, cert_path, cancel,
+        )
+        .await
     } else {
         unavailable_result("No IPv6 address resolved")
     });
@@ -110,6 +122,7 @@ async fn test_ip_version(
     interface: Option<&str>,
     bind_ip: Option<IpAddr>,
     cert_path: Option<&std::path::Path>,
+    cancel: &AtomicBool,
 ) -> IpVersionResult {
     use super::network_bind;
 
@@ -150,7 +163,7 @@ async fn test_ip_version(
     };
 
     // Measure latency first
-    let latency_ms = match measure_latency(&client, base_url).await {
+    let latency_ms = match measure_latency(&client, base_url, cancel).await {
         Ok(lat) => lat,
         Err(e) => {
             return IpVersionResult {
@@ -165,7 +178,7 @@ async fn test_ip_version(
     };
 
     // Run abbreviated download test
-    let download_mbps = match run_download_test(&client, base_url, TEST_DURATION).await {
+    let download_mbps = match run_download_test(&client, base_url, TEST_DURATION, cancel).await {
         Ok(mbps) => mbps,
         Err(e) => {
             return IpVersionResult {
@@ -180,7 +193,7 @@ async fn test_ip_version(
     };
 
     // Run abbreviated upload test
-    let upload_mbps = match run_upload_test(&client, base_url, TEST_DURATION).await {
+    let upload_mbps = match run_upload_test(&client, base_url, TEST_DURATION, cancel).await {
         Ok(mbps) => mbps,
         Err(e) => {
             return IpVersionResult {
@@ -204,12 +217,33 @@ async fn test_ip_version(
     }
 }
 
-/// Measure latency to the server.
-async fn measure_latency(client: &reqwest::Client, base_url: &str) -> Result<f64> {
+/// Measure request latency on a warm connection: one throwaway request
+/// establishes TCP+TLS, then the median of several tiny requests is reported.
+/// This keeps the number comparable to the main test's probe latency instead
+/// of ~3x the path RTT (connect + handshake + TTFB).
+async fn measure_latency(
+    client: &reqwest::Client,
+    base_url: &str,
+    cancel: &AtomicBool,
+) -> Result<f64> {
     let url = format!("{}/__down?bytes=0", base_url);
-    let start = Instant::now();
-    let _resp = client.get(&url).send().await?;
-    Ok(start.elapsed().as_secs_f64() * 1000.0)
+    let warmup = client.get(&url).send().await?.error_for_status()?;
+    let _ = warmup.bytes().await;
+
+    let mut samples = Vec::with_capacity(crate::constants::IP_COMPARISON_LATENCY_PROBES);
+    for _ in 0..crate::constants::IP_COMPARISON_LATENCY_PROBES {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let start = Instant::now();
+        let resp = client.get(&url).send().await?.error_for_status()?;
+        let _ = resp.bytes().await;
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    crate::metrics::compute_sample_metrics(&samples)
+        .map(|m| m.median)
+        .ok_or_else(|| anyhow::anyhow!("no latency samples collected"))
 }
 
 /// Run abbreviated download test.
@@ -217,13 +251,14 @@ async fn run_download_test(
     client: &reqwest::Client,
     base_url: &str,
     duration: Duration,
+    cancel: &AtomicBool,
 ) -> Result<f64> {
     let url = format!("{}/__down?bytes=5000000", base_url); // 5MB chunks
     let start = Instant::now();
     let mut total_bytes: u64 = 0;
 
-    while start.elapsed() < duration {
-        let resp = client.get(&url).send().await?;
+    while start.elapsed() < duration && !cancel.load(Ordering::Relaxed) {
+        let resp = client.get(&url).send().await?.error_for_status()?;
         let bytes = resp.bytes().await?;
         total_bytes += bytes.len() as u64;
     }
@@ -238,14 +273,20 @@ async fn run_upload_test(
     client: &reqwest::Client,
     base_url: &str,
     duration: Duration,
+    cancel: &AtomicBool,
 ) -> Result<f64> {
     let url = format!("{}/__up", base_url);
     let upload_data = vec![0u8; 5_000_000]; // 5MB chunks
     let start = Instant::now();
     let mut total_bytes: u64 = 0;
 
-    while start.elapsed() < duration {
-        let _resp = client.post(&url).body(upload_data.clone()).send().await?;
+    while start.elapsed() < duration && !cancel.load(Ordering::Relaxed) {
+        client
+            .post(&url)
+            .body(upload_data.clone())
+            .send()
+            .await?
+            .error_for_status()?;
         total_bytes += upload_data.len() as u64;
     }
 
