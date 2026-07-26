@@ -33,7 +33,10 @@ use tokio::sync::mpsc;
 
 use charts::draw_charts;
 use dashboard::draw_dashboard;
-use export::{copy_to_clipboard, enrich_result_with_network_info, export_result_csv, export_result_json, save_and_show_path};
+use export::{
+    copy_to_clipboard, enrich_result_with_network_info, export_result_csv, export_result_json,
+    save_and_show_path,
+};
 use help::draw_help;
 use history::{
     draw_history_comment_modal, draw_history_detail, draw_history_export_modal, draw_history_menu,
@@ -67,7 +70,6 @@ pub async fn run(args: Cli) -> Result<()> {
     };
     state.history.initial_load_size = initial_load;
     state.history.runs = crate::storage::load_recent(initial_load).unwrap_or_default();
-    state.history.loaded_count = state.history.runs.len();
     update_available_networks(&mut state);
 
     // Gather network interface information using shared module
@@ -191,25 +193,22 @@ pub async fn run(args: Cli) -> Result<()> {
                         (_, KeyCode::Char('r')) => {
                             // Refresh history (only when on history tab)
                             if state.tab == 1 {
-                                let reload_size = state.history.initial_load_size.max(state.history.loaded_count);
+                                let reload_size = state.history.initial_load_size.max(state.history.runs.len());
                                 match crate::storage::load_recent(reload_size) {
                                     Ok(new_history) => {
                                         let old_count = state.history.runs.len();
                                         state.history.runs = new_history;
-                                        state.history.loaded_count = state.history.runs.len();
+                                        state.history.all_loaded = false;
                                         update_available_networks(&mut state);
 
-                                        // Adjust selection if needed
-                                        if state.history.selected >= state.history.runs.len() && !state.history.runs.is_empty() {
-                                            state.history.selected = state.history.runs.len() - 1;
-                                        } else if state.history.runs.is_empty() {
+                                        // Keep the highlight inside the visible (filtered) list;
+                                        // the renderer re-clamps the scroll offset on the next draw.
+                                        let visible = state.history.visible_len();
+                                        if visible == 0 {
                                             state.history.selected = 0;
                                             state.history.scroll_offset = 0;
-                                        }
-
-                                        // Adjust scroll offset if needed
-                                        if state.history.scroll_offset >= state.history.runs.len() && !state.history.runs.is_empty() {
-                                            state.history.scroll_offset = state.history.runs.len().saturating_sub(20).max(0);
+                                        } else {
+                                            state.history.selected = state.history.selected.min(visible - 1);
                                         }
 
                                         let new_count = state.history.runs.len();
@@ -287,7 +286,7 @@ pub async fn run(args: Cli) -> Result<()> {
                         }
                         (_, KeyCode::Char(' ')) => {
                             if state.tab == 1
-                                && !state.history.runs.is_empty()
+                                && state.history.visible_len() > 0
                                 && !state.history.filter_editing
                                 && !state.history.detail_view
                                 && !state.history.export_modal_open
@@ -315,19 +314,21 @@ pub async fn run(args: Cli) -> Result<()> {
                                 // Dashboard: scroll Test Activity log forward one line.
                                 state.dashboard_log_scroll =
                                     state.dashboard_log_scroll.saturating_sub(1);
-                            } else if state.tab == 1 && !state.history.runs.is_empty() {
-                                if state.history.selected < state.history.runs.len().saturating_sub(1) {
+                            } else if state.tab == 1 {
+                                // Load before moving so the last visible row can still
+                                // pull older entries (or more filter matches) from disk.
+                                lazy_load_more_history(&mut state);
+                                if state.history.selected + 1 < state.history.visible_len() {
                                     state.history.selected += 1;
-
-                                    // Lazy load: if near end of loaded items, load more
-                                    lazy_load_more_history(&mut state);
                                 }
                             }
                         }
                         (_, KeyCode::PageUp) => {
                             if state.tab == 1 && !state.history.runs.is_empty() {
-                                let page_size = 20;
-                                state.history.selected = state.history.selected.saturating_sub(page_size);
+                                state.history.selected = state
+                                    .history
+                                    .selected
+                                    .saturating_sub(crate::constants::HISTORY_PAGE_SIZE);
                             } else if state.tab == 0 {
                                 let max_scroll = state.text_log.len().saturating_sub(1);
                                 state.dashboard_log_scroll =
@@ -338,13 +339,14 @@ pub async fn run(args: Cli) -> Result<()> {
                             if state.tab == 0 {
                                 state.dashboard_log_scroll =
                                     state.dashboard_log_scroll.saturating_sub(10);
-                            } else if state.tab == 1 && !state.history.runs.is_empty() {
-                                let page_size = 20;
-                                let max_idx = state.history.runs.len().saturating_sub(1);
-                                state.history.selected = (state.history.selected + page_size).min(max_idx);
-
-                                // Lazy load if near the end
+                            } else if state.tab == 1 {
                                 lazy_load_more_history(&mut state);
+                                let visible = state.history.visible_len();
+                                if visible > 0 {
+                                    state.history.selected = (state.history.selected
+                                        + crate::constants::HISTORY_PAGE_SIZE)
+                                        .min(visible - 1);
+                                }
                             }
                         }
                         // Filter controls (only on History tab)
@@ -393,8 +395,8 @@ pub async fn run(args: Cli) -> Result<()> {
                                 }
                             }
                         }
-                        (_, KeyCode::Right) | (_, KeyCode::Char('l')) => {
-                            if state.tab == 2 && !state.charts_available_networks.is_empty() {
+                        (_, KeyCode::Right) | (_, KeyCode::Char('l'))
+                            if state.tab == 2 && !state.charts_available_networks.is_empty() => {
                                 // Cycle forwards: All -> first network -> ... -> last network -> All
                                 match &state.charts_network_filter {
                                     None => {
@@ -423,7 +425,6 @@ pub async fn run(args: Cli) -> Result<()> {
                                     }
                                 }
                             }
-                        }
                         _ => {}
                     }
                 }
@@ -522,22 +523,30 @@ pub async fn run(args: Cli) -> Result<()> {
 }
 
 fn lazy_load_more_history(state: &mut UiState) {
-    let load_threshold = state.history.loaded_count.saturating_sub(10);
-    if state.history.selected < load_threshold || state.history.loaded_count != state.history.runs.len() {
+    // Only hit the disk when the highlight is near the end of the visible
+    // list and a previous attempt hasn't already exhausted the run files.
+    if state.history.all_loaded
+        || state.history.selected + crate::constants::HISTORY_LAZY_LOAD_THRESHOLD
+            < state.history.visible_len()
+    {
         return;
     }
-    let current_count = state.history.runs.len();
-    let load_more = current_count.max(20);
-    if let Ok(more_history) = crate::storage::load_recent(load_more) {
-        let existing_ids: std::collections::HashSet<_> =
-            state.history.runs.iter().map(|r| &r.meas_id).collect();
+    let (offset, chunk) = state.history.next_load_range();
+    if let Ok(more_history) = crate::storage::load_recent_range(offset, chunk) {
+        let existing_ids: std::collections::HashSet<_> = state
+            .history
+            .runs
+            .iter()
+            .map(|r| r.meas_id.clone())
+            .collect();
         let new_items: Vec<_> = more_history
             .into_iter()
             .filter(|r| !existing_ids.contains(&r.meas_id))
             .collect();
-        if !new_items.is_empty() {
+        if new_items.is_empty() {
+            state.history.all_loaded = true;
+        } else {
             state.history.runs.extend(new_items);
-            state.history.loaded_count = state.history.runs.len();
             update_available_networks(state);
         }
     }
@@ -679,10 +688,9 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
                             UiState::push_point(&mut state.latency.loaded_dl_lat_points, t, ms);
                             state.latency.loaded_dl_latency_samples.push(ms);
                             if state.latency.loaded_dl_latency_samples.len() > 10000 {
-                                state
-                                    .latency
-                                    .loaded_dl_latency_samples
-                                    .drain(0..(state.latency.loaded_dl_latency_samples.len() - 10000));
+                                state.latency.loaded_dl_latency_samples.drain(
+                                    0..(state.latency.loaded_dl_latency_samples.len() - 10000),
+                                );
                             }
                         }
                     }
@@ -697,10 +705,9 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
                             UiState::push_point(&mut state.latency.loaded_ul_lat_points, t, ms);
                             state.latency.loaded_ul_latency_samples.push(ms);
                             if state.latency.loaded_ul_latency_samples.len() > 10000 {
-                                state
-                                    .latency
-                                    .loaded_ul_latency_samples
-                                    .drain(0..(state.latency.loaded_ul_latency_samples.len() - 10000));
+                                state.latency.loaded_ul_latency_samples.drain(
+                                    0..(state.latency.loaded_ul_latency_samples.len() - 10000),
+                                );
                             }
                         }
                     }
@@ -721,22 +728,32 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
                     state.throughput.dl_bytes_total = bytes_total;
                     if let Some(t0) = state.throughput.dl_phase_start {
                         let secs = t0.elapsed().as_secs_f64().max(1e-9);
-                        state.throughput.dl_avg_mbps = ((bytes_total as f64) / secs) * 8.0 / 1_000_000.0;
+                        state.throughput.dl_avg_mbps =
+                            ((bytes_total as f64) / secs) * 8.0 / 1_000_000.0;
                     }
                     let v = state.throughput.dl_mbps.round().clamp(0.0, 10_000.0) as u64;
                     UiState::push_series(&mut state.throughput.dl_series, v);
-                    UiState::push_point(&mut state.throughput.dl_points, t, state.throughput.dl_mbps.max(0.0));
+                    UiState::push_point(
+                        &mut state.throughput.dl_points,
+                        t,
+                        state.throughput.dl_mbps.max(0.0),
+                    );
                 }
                 Phase::Upload => {
                     state.throughput.ul_mbps = mbps;
                     state.throughput.ul_bytes_total = bytes_total;
                     if let Some(t0) = state.throughput.ul_phase_start {
                         let secs = t0.elapsed().as_secs_f64().max(1e-9);
-                        state.throughput.ul_avg_mbps = ((bytes_total as f64) / secs) * 8.0 / 1_000_000.0;
+                        state.throughput.ul_avg_mbps =
+                            ((bytes_total as f64) / secs) * 8.0 / 1_000_000.0;
                     }
                     let v = state.throughput.ul_mbps.round().clamp(0.0, 10_000.0) as u64;
                     UiState::push_series(&mut state.throughput.ul_series, v);
-                    UiState::push_point(&mut state.throughput.ul_points, t, state.throughput.ul_mbps.max(0.0));
+                    UiState::push_point(
+                        &mut state.throughput.ul_points,
+                        t,
+                        state.throughput.ul_mbps.max(0.0),
+                    );
                 }
                 _ => {}
             }
@@ -831,10 +848,10 @@ fn apply_event(state: &mut UiState, ev: TestEvent) {
 }
 
 fn open_history_detail(state: &mut UiState) {
-    if state.history.runs.is_empty() || state.history.selected >= state.history.runs.len() {
+    let Some(idx) = state.history.selected_run_index() else {
         return;
-    }
-    let r = &state.history.runs[state.history.selected];
+    };
+    let r = &state.history.runs[idx];
     let json = serde_json::to_string_pretty(r)
         .unwrap_or_else(|e| format!("Error serializing JSON: {}", e));
     let lines: Vec<String> = json.lines().map(String::from).collect();
@@ -976,10 +993,10 @@ fn open_export_modal(state: &mut UiState, path: String) {
 }
 
 fn export_history_selected_json(state: &mut UiState) {
-    if state.history.runs.is_empty() || state.history.selected >= state.history.runs.len() {
+    let Some(idx) = state.history.selected_run_index() else {
         return;
-    }
-    let r = &state.history.runs[state.history.selected];
+    };
+    let r = &state.history.runs[idx];
     match export_result_json(r, state) {
         Ok(p) => open_export_modal(state, p.to_string_lossy().to_string()),
         Err(e) => state.info = format!("JSON export failed: {e:#}"),
@@ -987,10 +1004,10 @@ fn export_history_selected_json(state: &mut UiState) {
 }
 
 fn export_history_selected_csv(state: &mut UiState) {
-    if state.history.runs.is_empty() || state.history.selected >= state.history.runs.len() {
+    let Some(idx) = state.history.selected_run_index() else {
         return;
-    }
-    let r = &state.history.runs[state.history.selected];
+    };
+    let r = &state.history.runs[idx];
     match export_result_csv(r, state) {
         Ok(p) => open_export_modal(state, p.to_string_lossy().to_string()),
         Err(e) => state.info = format!("CSV export failed: {e:#}"),
@@ -998,13 +1015,10 @@ fn export_history_selected_csv(state: &mut UiState) {
 }
 
 fn open_comment_modal(state: &mut UiState) {
-    if state.history.runs.is_empty() || state.history.selected >= state.history.runs.len() {
+    let Some(idx) = state.history.selected_run_index() else {
         return;
-    }
-    let existing = state.history.runs[state.history.selected]
-        .comments
-        .clone()
-        .unwrap_or_default();
+    };
+    let existing = state.history.runs[idx].comments.clone().unwrap_or_default();
     let lines = if existing.is_empty() {
         vec![String::new()]
     } else {
@@ -1027,7 +1041,7 @@ fn handle_history_comment_modal_key(state: &mut UiState, k: crossterm::event::Ke
             state.history.comment_modal_textarea = ratatui_textarea::TextArea::default();
         }
         KeyCode::Enter => {
-            if state.history.selected < state.history.runs.len() {
+            if let Some(idx) = state.history.selected_run_index() {
                 let value = state
                     .history
                     .comment_modal_textarea
@@ -1036,8 +1050,8 @@ fn handle_history_comment_modal_key(state: &mut UiState, k: crossterm::event::Ke
                     .trim()
                     .to_string();
                 let new_comment = if value.is_empty() { None } else { Some(value) };
-                state.history.runs[state.history.selected].comments = new_comment;
-                if let Err(e) = crate::storage::save_run(&state.history.runs[state.history.selected]) {
+                state.history.runs[idx].comments = new_comment;
+                if let Err(e) = crate::storage::save_run(&state.history.runs[idx]) {
                     state.info = format!("Save comment failed: {e:#}");
                 } else {
                     state.info = "Comment saved".into();
@@ -1072,24 +1086,25 @@ fn handle_history_export_modal_key(state: &mut UiState, code: KeyCode) {
 }
 
 fn delete_history_selected(state: &mut UiState) {
-    if state.history.runs.is_empty() || state.history.selected >= state.history.runs.len() {
+    let Some(idx) = state.history.selected_run_index() else {
         return;
-    }
-    let to_delete = state.history.runs[state.history.selected].clone();
+    };
+    let to_delete = state.history.runs[idx].clone();
     if let Err(e) = crate::storage::delete_run(&to_delete) {
         state.info = format!("Delete failed: {e:#}");
         return;
     }
-    state.history.runs.remove(state.history.selected);
-    if state.history.scroll_offset >= state.history.runs.len() && !state.history.runs.is_empty() {
-        state.history.scroll_offset = state.history.runs.len().saturating_sub(20).max(0);
-    }
-    if state.history.selected >= state.history.runs.len() && !state.history.runs.is_empty() {
-        state.history.selected = state.history.runs.len() - 1;
-    } else if state.history.runs.is_empty() {
+    state.history.runs.remove(idx);
+    // Keep the highlight inside the now-shorter visible list; the renderer
+    // re-clamps the scroll offset on the next draw.
+    let visible = state.history.visible_len();
+    if visible == 0 {
         state.history.selected = 0;
         state.history.scroll_offset = 0;
+    } else {
+        state.history.selected = state.history.selected.min(visible - 1);
     }
+    update_available_networks(state);
     state.info = "Deleted".into();
 }
 
@@ -1127,10 +1142,7 @@ fn draw(area: Rect, f: &mut ratatui::Frame, state: &mut UiState) {
         .constraints([Constraint::Length(3), Constraint::Min(0)].as_ref())
         .split(area);
 
-    let mut tab_titles: Vec<Line> = vec![
-        Line::from("Dashboard"),
-        Line::from("History"),
-    ];
+    let mut tab_titles: Vec<Line> = vec![Line::from("Dashboard"), Line::from("History")];
     if state.diagnostics.traceroute_enabled {
         tab_titles.push(Line::from("Traceroute"));
     }
@@ -1138,24 +1150,44 @@ fn draw(area: Rect, f: &mut ratatui::Frame, state: &mut UiState) {
     tab_titles.push(Line::from("Help"));
 
     let tabs = Tabs::new(tab_titles)
-    .select(state.tab)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(match &state.update_status {
-                Some(Some(v)) => Line::from(vec![
-                    Span::raw(format!("cloudflare-speed-cli v{} ", env!("CARGO_PKG_VERSION"))),
-                    Span::styled(format!("(v{} available)", v), Style::default().fg(Color::Cyan)),
-                ]),
-                Some(None) => Line::from(format!("cloudflare-speed-cli v{} (latest)", env!("CARGO_PKG_VERSION"))),
-                None => Line::from(format!("cloudflare-speed-cli v{}", env!("CARGO_PKG_VERSION"))),
-            }),
-    )
-    .highlight_style(Style::default().fg(Color::Yellow));
+        .select(state.tab)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(match &state.update_status {
+                    Some(Some(v)) => Line::from(vec![
+                        Span::raw(format!(
+                            "cloudflare-speed-cli v{} ",
+                            env!("CARGO_PKG_VERSION")
+                        )),
+                        Span::styled(
+                            format!("(v{} available)", v),
+                            Style::default().fg(Color::Cyan),
+                        ),
+                    ]),
+                    Some(None) => Line::from(format!(
+                        "cloudflare-speed-cli v{} (latest)",
+                        env!("CARGO_PKG_VERSION")
+                    )),
+                    None => Line::from(format!(
+                        "cloudflare-speed-cli v{}",
+                        env!("CARGO_PKG_VERSION")
+                    )),
+                }),
+        )
+        .highlight_style(Style::default().fg(Color::Yellow));
     f.render_widget(tabs, chunks[0]);
 
-    let traceroute_idx: Option<usize> = if state.diagnostics.traceroute_enabled { Some(2) } else { None };
-    let charts_idx: usize = if state.diagnostics.traceroute_enabled { 3 } else { 2 };
+    let traceroute_idx: Option<usize> = if state.diagnostics.traceroute_enabled {
+        Some(2)
+    } else {
+        None
+    };
+    let charts_idx: usize = if state.diagnostics.traceroute_enabled {
+        3
+    } else {
+        2
+    };
 
     match state.tab {
         0 => draw_dashboard(chunks[1], f, state),
