@@ -1,11 +1,13 @@
-use crate::model::{DnsSummary, IpVersionComparison, Phase, RunResult, TlsSummary, TracerouteHop, TracerouteSummary};
+use crate::model::{
+    DnsSummary, IpVersionComparison, Phase, RunResult, TlsSummary, TracerouteHop, TracerouteSummary,
+};
 use ratatui::{
     style::Color,
     style::Style,
     text::{Line, Span},
 };
-use std::time::Instant;
 use ratatui_textarea::TextArea;
+use std::time::Instant;
 
 #[derive(Default)]
 pub struct ThroughputUi {
@@ -50,7 +52,9 @@ pub struct HistoryUi {
     pub runs: Vec<RunResult>,
     pub selected: usize,
     pub scroll_offset: usize,
-    pub loaded_count: usize,
+    /// Set once a lazy load finds nothing new on disk, so scrolling at the
+    /// end of the list stops re-scanning the runs directory on every keypress.
+    pub all_loaded: bool,
     pub initial_load_size: usize,
     pub filter: String,
     pub filter_editing: bool,
@@ -74,7 +78,7 @@ impl Default for HistoryUi {
             runs: Vec::new(),
             selected: 0,
             scroll_offset: 0,
-            loaded_count: 0,
+            all_loaded: false,
             initial_load_size: 66,
             filter: String::new(),
             filter_editing: false,
@@ -91,6 +95,68 @@ impl Default for HistoryUi {
             comment_modal_open: false,
             comment_modal_textarea: TextArea::default(),
         }
+    }
+}
+
+impl HistoryUi {
+    /// True when `r` matches the active filter text (already lowercased).
+    /// Searched fields: network name, interface, AS org, colo, comments.
+    pub fn run_matches_filter(r: &RunResult, filter_lower: &str) -> bool {
+        let matches_field = |opt: &Option<String>| {
+            opt.as_ref()
+                .map(|s| s.to_lowercase().contains(filter_lower))
+                .unwrap_or(false)
+        };
+        matches_field(&r.network_name)
+            || matches_field(&r.interface_name)
+            || matches_field(&r.as_org)
+            || matches_field(&r.colo)
+            || matches_field(&r.comments)
+    }
+
+    /// Indices into `runs` of the rows the History tab currently shows,
+    /// in display order. Identity when no filter is active.
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return (0..self.runs.len()).collect();
+        }
+        let filter_lower = self.filter.to_lowercase();
+        self.runs
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| Self::run_matches_filter(r, &filter_lower))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Number of rows the History tab currently shows.
+    pub fn visible_len(&self) -> usize {
+        self.filtered_indices().len()
+    }
+
+    /// Index into `runs` of the highlighted row, honoring the active filter.
+    /// `None` when nothing is visible. This is the ONLY correct way for an
+    /// action (delete/export/comment/detail) to resolve the selected run.
+    pub fn selected_run_index(&self) -> Option<usize> {
+        let visible = self.filtered_indices();
+        if visible.is_empty() {
+            None
+        } else {
+            // Clamp like the renderer does, so the highlighted row and the
+            // acted-on row can never diverge.
+            Some(visible[self.selected.min(visible.len() - 1)])
+        }
+    }
+
+    /// The (offset, chunk) to request from storage on the next lazy load:
+    /// only entries beyond those already in memory, one chunk at a time, so
+    /// scrolling never re-parses the files already loaded.
+    pub fn next_load_range(&self) -> (usize, usize) {
+        (
+            self.runs.len(),
+            self.initial_load_size
+                .max(crate::constants::HISTORY_LOAD_CHUNK_MIN),
+        )
     }
 }
 
@@ -304,7 +370,6 @@ impl UiState {
             return;
         }
         self.history.runs.insert(0, run);
-        self.history.loaded_count = self.history.runs.len();
         update_available_networks(self);
     }
 
@@ -362,5 +427,84 @@ impl UiState {
                 ..Default::default()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::empty_run_result;
+
+    fn run_with_network(name: &str) -> RunResult {
+        let mut r = empty_run_result();
+        r.network_name = Some(name.into());
+        r
+    }
+
+    fn history_with_networks(names: &[&str]) -> HistoryUi {
+        HistoryUi {
+            runs: names.iter().map(|n| run_with_network(n)).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn filtered_indices_identity_without_filter() {
+        let h = history_with_networks(&["HomeWifi", "Office", "home-5g"]);
+        assert_eq!(h.filtered_indices(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn filtered_indices_respect_active_filter() {
+        let mut h = history_with_networks(&["HomeWifi", "Office", "home-5g"]);
+        h.filter = "Home".into();
+        assert_eq!(h.filtered_indices(), vec![0, 2]);
+    }
+
+    #[test]
+    fn selected_run_index_resolves_through_filter() {
+        let mut h = history_with_networks(&["HomeWifi", "Office", "home-5g"]);
+        h.filter = "home".into();
+        // Highlighting the second visible row must resolve to runs[2],
+        // not runs[1] (which the filter hides).
+        h.selected = 1;
+        assert_eq!(h.selected_run_index(), Some(2));
+    }
+
+    #[test]
+    fn selected_run_index_clamps_to_last_visible_row() {
+        let mut h = history_with_networks(&["HomeWifi", "Office", "home-5g"]);
+        h.filter = "home".into();
+        h.selected = 99;
+        assert_eq!(h.selected_run_index(), Some(2));
+    }
+
+    #[test]
+    fn selected_run_index_none_when_filter_matches_nothing() {
+        let mut h = history_with_networks(&["HomeWifi", "Office"]);
+        h.filter = "zzz".into();
+        h.selected = 0;
+        assert_eq!(h.selected_run_index(), None);
+    }
+
+    #[test]
+    fn selected_run_index_none_when_empty() {
+        let h = HistoryUi::default();
+        assert_eq!(h.selected_run_index(), None);
+    }
+
+    #[test]
+    fn next_load_range_starts_beyond_loaded_entries() {
+        let h = HistoryUi {
+            runs: (0..66).map(|_| empty_run_result()).collect(),
+            ..Default::default()
+        };
+        let (offset, chunk) = h.next_load_range();
+        assert_eq!(
+            offset,
+            h.runs.len(),
+            "lazy load must skip what is already in memory"
+        );
+        assert!(chunk > 0, "lazy load must actually request new entries");
     }
 }

@@ -148,13 +148,18 @@ pub struct Cli {
 
 pub async fn run(args: Cli) -> Result<()> {
     if let Some(p) = args.export_all_csv.as_deref() {
-        let all = crate::storage::load_all()?;
+        let (all, skipped) = crate::storage::load_all_with_skipped()?;
         crate::storage::export_all_csv(p, &all)?;
-        eprintln!(
-            "Exported {} run(s) to {}",
-            all.len(),
-            p.display()
-        );
+        eprintln!("Exported {} run(s) to {}", all.len(), p.display());
+        for s in &skipped {
+            eprintln!("Warning: skipped unreadable run file {}", s.display());
+        }
+        // Documented as "no test is run unless combined with a run mode":
+        // exit here instead of falling through to the TUI (which would
+        // auto-start a test).
+        if !(args.json || args.text || args.silent) {
+            return Ok(());
+        }
     }
 
     // Validate that --silent can only be used with --json
@@ -236,13 +241,15 @@ pub fn build_config(args: &Cli) -> Result<RunConfig> {
         if network_bind::device_binding_supported() {
             None
         } else {
-            Some(network_bind::interface_source_ip(iface, family).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Interface '{}' has no usable {} address",
-                    iface,
-                    family.map(|f| f.label()).unwrap_or("IP")
-                )
-            })?)
+            Some(
+                network_bind::interface_source_ip(iface, family).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Interface '{}' has no usable {} address",
+                        iface,
+                        family.map(|f| f.label()).unwrap_or("IP")
+                    )
+                })?,
+            )
         }
     } else {
         None
@@ -453,8 +460,7 @@ async fn run_text(args: Cli) -> Result<()> {
         Err(e) => return Err(e.into()),
     };
 
-    result.connection_quality =
-        crate::quality::compute(&result, &dl_points, &ul_points);
+    result.connection_quality = crate::quality::compute(&result, &dl_points, &ul_points);
 
     // Gather network information and enrich result
     let network_info = crate::network::gather_network_info(&args);

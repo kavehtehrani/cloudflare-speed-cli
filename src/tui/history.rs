@@ -59,9 +59,9 @@ const MENU_FOOTER_LINE_2: &str = "Esc: close";
 /// depending on whether the selected run already has a comment.
 pub fn menu_labels(state: &UiState) -> [&'static str; MENU_ITEM_COUNT] {
     let has_comment = state
-        .history.runs
-        .get(state.history.selected)
-        .and_then(|r| r.comments.as_deref())
+        .history
+        .selected_run_index()
+        .and_then(|i| state.history.runs[i].comments.as_deref())
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
     let comment_label = if has_comment {
@@ -81,28 +81,14 @@ pub fn menu_labels(state: &UiState) -> [&'static str; MENU_ITEM_COUNT] {
 pub fn show_history(area: Rect, f: &mut Frame, state: &mut UiState) {
     let mut lines: Vec<Line> = Vec::new();
 
-    // Filter history based on filter text (case-insensitive search in network_name, interface_name, as_org, colo)
-    let filter_lower = state.history.filter.to_lowercase();
-    let filtered_history: Vec<&RunResult> = if state.history.filter.is_empty() {
-        state.history.runs.iter().collect()
-    } else {
-        state
-            .history.runs
-            .iter()
-            .filter(|r| {
-                let matches_field = |opt: &Option<String>| {
-                    opt.as_ref()
-                        .map(|s| s.to_lowercase().contains(&filter_lower))
-                        .unwrap_or(false)
-                };
-                matches_field(&r.network_name)
-                    || matches_field(&r.interface_name)
-                    || matches_field(&r.as_org)
-                    || matches_field(&r.colo)
-                    || matches_field(&r.comments)
-            })
-            .collect()
-    };
+    // Same filtered view the action handlers resolve through (selected_run_index),
+    // so the highlighted row and the acted-on run can never diverge.
+    let filtered_history: Vec<&RunResult> = state
+        .history
+        .filtered_indices()
+        .into_iter()
+        .map(|i| &state.history.runs[i])
+        .collect();
 
     // Calculate how many items can fit in the available area
     // Subtract 4 for: controls line, filter line (optional), column headers, borders
@@ -117,7 +103,10 @@ pub fn show_history(area: Rect, f: &mut Frame, state: &mut UiState) {
     };
 
     // Build header line with controls
-    let mut header_spans = vec![Span::raw(format!("History ({}/{}", current_pos, total_count))];
+    let mut header_spans = vec![Span::raw(format!(
+        "History ({}/{}",
+        current_pos, total_count
+    ))];
     if !state.history.filter.is_empty() {
         header_spans.push(Span::styled(
             format!(" filtered from {}", state.history.runs.len()),
@@ -399,7 +388,7 @@ pub fn show_history(area: Rect, f: &mut Frame, state: &mut UiState) {
         } else {
             r.network_name
                 .as_deref()
-                .or_else(|| r.interface_name.as_deref())
+                .or(r.interface_name.as_deref())
                 .unwrap_or("-")
         };
         let history_loss_text = r
@@ -523,8 +512,8 @@ pub fn show_history(area: Rect, f: &mut Frame, state: &mut UiState) {
 
     // Render scrollbar on the right edge if there are more items than visible
     if total_count > max_items {
-        let mut scrollbar_state = ScrollbarState::new(total_count.saturating_sub(max_items))
-            .position(scroll_offset);
+        let mut scrollbar_state =
+            ScrollbarState::new(total_count.saturating_sub(max_items)).position(scroll_offset);
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("↑"))
@@ -542,31 +531,7 @@ pub fn draw_history_detail(area: Rect, f: &mut Frame, state: &mut UiState) {
     // Header with run identity and navigation help
     let mut header_lines: Vec<Line> = Vec::new();
 
-    let filter_lower = state.history.filter.to_lowercase();
-    let filtered_history: Vec<&RunResult> = if state.history.filter.is_empty() {
-        state.history.runs.iter().collect()
-    } else {
-        state
-            .history.runs
-            .iter()
-            .filter(|r| {
-                let matches_field = |opt: &Option<String>| {
-                    opt.as_ref()
-                        .map(|s| s.to_lowercase().contains(&filter_lower))
-                        .unwrap_or(false)
-                };
-                matches_field(&r.network_name)
-                    || matches_field(&r.interface_name)
-                    || matches_field(&r.as_org)
-                    || matches_field(&r.colo)
-                    || matches_field(&r.comments)
-            })
-            .collect()
-    };
-    let effective_selected = state
-        .history
-        .selected
-        .min(filtered_history.len().saturating_sub(1));
+    let selected_run = state.history.selected_run_index();
 
     header_lines.push(Line::from(vec![
         Span::styled("JSON Detail", Style::default().fg(Color::Cyan)),
@@ -579,11 +544,14 @@ pub fn draw_history_detail(area: Rect, f: &mut Frame, state: &mut UiState) {
         Span::raw("/"),
         Span::styled("N", Style::default().fg(Color::Magenta)),
         Span::raw(": next/prev, "),
-        Span::styled("\u{2191}\u{2193}/jk/PgUp/PgDn", Style::default().fg(Color::Magenta)),
+        Span::styled(
+            "\u{2191}\u{2193}/jk/PgUp/PgDn",
+            Style::default().fg(Color::Magenta),
+        ),
         Span::raw(": scroll"),
     ]));
 
-    if let Some(result) = filtered_history.get(effective_selected) {
+    if let Some(result) = selected_run.map(|i| &state.history.runs[i]) {
         let net_label = if state.hide_network_info {
             crate::tui::state::REDACTED_PLACEHOLDER
         } else {
@@ -600,9 +568,15 @@ pub fn draw_history_detail(area: Rect, f: &mut Frame, state: &mut UiState) {
     if state.history.detail_search_editing {
         let mut spans = vec![
             Span::styled("Search: ", Style::default().fg(Color::Cyan)),
-            Span::styled(&state.history.detail_search, Style::default().fg(Color::White)),
+            Span::styled(
+                &state.history.detail_search,
+                Style::default().fg(Color::White),
+            ),
             Span::styled("_", Style::default().fg(Color::Yellow)),
-            Span::styled("  (Enter to confirm, Esc to cancel)", Style::default().fg(Color::Gray)),
+            Span::styled(
+                "  (Enter to confirm, Esc to cancel)",
+                Style::default().fg(Color::Gray),
+            ),
         ];
         if let Some(ref err) = state.history.detail_search_error {
             spans.push(Span::styled(
@@ -614,7 +588,10 @@ pub fn draw_history_detail(area: Rect, f: &mut Frame, state: &mut UiState) {
     } else if !state.history.detail_search.is_empty() {
         header_lines.push(Line::from(vec![
             Span::styled("Search: ", Style::default().fg(Color::Cyan)),
-            Span::styled(&state.history.detail_search, Style::default().fg(Color::Yellow)),
+            Span::styled(
+                &state.history.detail_search,
+                Style::default().fg(Color::Yellow),
+            ),
             Span::styled("  (Esc to clear)", Style::default().fg(Color::Gray)),
         ]));
     }
@@ -701,8 +678,7 @@ pub fn draw_history_menu(area: Rect, f: &mut Frame, state: &UiState) {
     )]));
 
     f.render_widget(Clear, modal_area);
-    let p = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("Actions"));
+    let p = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Actions"));
     f.render_widget(p, modal_area);
 }
 
@@ -731,9 +707,7 @@ pub fn draw_history_comment_modal(area: Rect, f: &mut Frame, state: &UiState) {
     };
 
     f.render_widget(Clear, modal_area);
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .title("Edit Comment");
+    let outer = Block::default().borders(Borders::ALL).title("Edit Comment");
     let inner_area = outer.inner(modal_area);
     f.render_widget(outer, modal_area);
 
@@ -786,10 +760,9 @@ fn wrap_path(path: &str, width: u16) -> Vec<String> {
             break;
         }
 
-        let mut char_count = 0;
         let mut last_sep_pos = None;
         let mut break_pos = 0;
-        for (idx, ch) in remaining.char_indices() {
+        for (char_count, (idx, ch)) in remaining.char_indices().enumerate() {
             if char_count >= width {
                 break;
             }
@@ -797,7 +770,6 @@ fn wrap_path(path: &str, width: u16) -> Vec<String> {
                 last_sep_pos = Some(idx);
             }
             break_pos = idx + ch.len_utf8();
-            char_count += 1;
         }
 
         let split_pos = match last_sep_pos {
@@ -828,8 +800,7 @@ pub fn draw_history_export_modal(area: Rect, f: &mut Frame, state: &UiState) {
     let path_lines = wrap_path(path, inner_width);
 
     let path_line_count = path_lines.len() as u16;
-    let inner_height =
-        EXPORT_MODAL_HEADER_LINES + path_line_count + EXPORT_MODAL_FOOTER_LINES;
+    let inner_height = EXPORT_MODAL_HEADER_LINES + path_line_count + EXPORT_MODAL_FOOTER_LINES;
     let modal_height = (inner_height + EXPORT_MODAL_BORDER_OVERHEAD).min(area.height);
 
     let x = area.x + area.width.saturating_sub(modal_width) / 2;
@@ -870,7 +841,6 @@ pub fn draw_history_export_modal(area: Rect, f: &mut Frame, state: &UiState) {
     )]));
 
     f.render_widget(Clear, modal_area);
-    let p = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("Export"));
+    let p = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Export"));
     f.render_widget(p, modal_area);
 }

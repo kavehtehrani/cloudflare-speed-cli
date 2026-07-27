@@ -48,3 +48,14 @@ pub const MIN_STABILITY_SAMPLES: usize = 3;
 /// a `ThroughputTick`. Also serves as the minimum steady-state window length:
 /// a window shorter than one full interval carries too little signal to report.
 pub const THROUGHPUT_SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Minimum number of additional history entries fetched per lazy-load request
+/// when the History tab selection nears the end of the loaded window.
+pub const HISTORY_LOAD_CHUNK_MIN: usize = 20;
+
+/// Trigger history lazy-loading when the selection is within this many rows of
+/// the end of the visible (filtered) list.
+pub const HISTORY_LAZY_LOAD_THRESHOLD: usize = 10;
+
+/// Rows PageUp/PageDown jump by in the History tab.
+pub const HISTORY_PAGE_SIZE: usize = 20;

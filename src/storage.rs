@@ -14,24 +14,38 @@ fn runs_dir() -> PathBuf {
     base_dir().join("runs")
 }
 
-/// Ensure the necessary directories exist for storing data.
-pub fn ensure_dirs() -> Result<()> {
-    std::fs::create_dir_all(runs_dir()).context("create runs dir")?;
-    Ok(())
+pub fn save_run(result: &RunResult) -> Result<PathBuf> {
+    save_run_to(&runs_dir(), result)
 }
 
-pub fn save_run(result: &RunResult) -> Result<PathBuf> {
-    ensure_dirs()?;
-    let path = get_run_path(result)?;
+/// Save a run into `dir` (the runs directory). The write is atomic (write to
+/// a temp file, then rename) so a crash or full disk mid-write can never
+/// leave a truncated run file behind.
+fn save_run_to(dir: &Path, result: &RunResult) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir).context("create runs dir")?;
+    let path = run_path_in(dir, result);
     let data = serde_json::to_vec_pretty(result)?;
-    std::fs::write(&path, data).context("write run json")?;
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, data) {
+        // Don't leave a partial temp file behind (e.g. disk full mid-write).
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).context("write run json");
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).context("finalize run json");
+    }
     Ok(path)
 }
 
-pub fn get_run_path(result: &RunResult) -> Result<PathBuf> {
+fn run_path_in(dir: &Path, result: &RunResult) -> PathBuf {
     let ts = &result.timestamp_utc;
     let safe_ts = ts.replace(':', "-").replace('T', "_");
-    Ok(runs_dir().join(format!("run-{safe_ts}-{}.json", result.meas_id)))
+    dir.join(format!("run-{safe_ts}-{}.json", result.meas_id))
+}
+
+pub fn get_run_path(result: &RunResult) -> Result<PathBuf> {
+    Ok(run_path_in(&runs_dir(), result))
 }
 
 pub fn delete_run(result: &RunResult) -> Result<()> {
@@ -122,11 +136,19 @@ fn csv_row(result: &RunResult) -> String {
         match result.connection_quality.as_ref() {
             Some(cq) => (
                 cq.bufferbloat_grade.clone(),
-                cq.bufferbloat_ms.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+                cq.bufferbloat_ms
+                    .map(|v| format!("{:.3}", v))
+                    .unwrap_or_default(),
                 cq.stability_grade.clone(),
-                cq.stability_cv_pct.map(|v| format!("{:.3}", v)).unwrap_or_default(),
-                cq.stability_cv_download_pct.map(|v| format!("{:.3}", v)).unwrap_or_default(),
-                cq.stability_cv_upload_pct.map(|v| format!("{:.3}", v)).unwrap_or_default(),
+                cq.stability_cv_pct
+                    .map(|v| format!("{:.3}", v))
+                    .unwrap_or_default(),
+                cq.stability_cv_download_pct
+                    .map(|v| format!("{:.3}", v))
+                    .unwrap_or_default(),
+                cq.stability_cv_upload_pct
+                    .map(|v| format!("{:.3}", v))
+                    .unwrap_or_default(),
             ),
             None => (
                 String::new(),
@@ -229,12 +251,14 @@ pub fn export_all_csv(path: &Path, results: &[RunResult]) -> Result<()> {
     Ok(())
 }
 
-/// List run JSON paths newest-first without reading file contents.
-fn list_run_paths(limit: usize) -> Result<Vec<PathBuf>> {
-    ensure_dirs()?;
-    let dir = runs_dir();
+/// List run JSON paths in `dir` newest-first without reading file contents.
+/// A missing directory is treated as an empty history.
+fn list_run_paths_in(dir: &Path, limit: usize) -> Result<Vec<PathBuf>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
     let mut entries: Vec<PathBuf> = Vec::new();
-    for e in std::fs::read_dir(&dir).context("read runs dir")? {
+    for e in std::fs::read_dir(dir).context("read runs dir")? {
         let e = e?;
         let p = e.path();
         if p.extension().and_then(|e| e.to_str()) == Some("json") {
@@ -250,27 +274,138 @@ fn list_run_paths(limit: usize) -> Result<Vec<PathBuf>> {
     Ok(entries)
 }
 
-pub fn load_recent(limit: usize) -> Result<Vec<RunResult>> {
-    let paths = list_run_paths(limit)?;
-    let mut out = Vec::with_capacity(paths.len());
-    for p in paths {
-        let data = std::fs::read(&p).with_context(|| format!("read {}", p.display()))?;
-        let r: RunResult =
-            serde_json::from_slice(&data).with_context(|| format!("parse {}", p.display()))?;
-        out.push(r);
+/// Load up to `limit` runs from `dir` starting `offset` entries into the
+/// newest-first ordering, parsing ONLY that slice. Returns the runs that
+/// parsed plus the paths of files that could not be read or parsed. A single
+/// corrupt file must never make the rest of the history unreachable.
+fn load_runs_range_from(
+    dir: &Path,
+    offset: usize,
+    limit: usize,
+) -> Result<(Vec<RunResult>, Vec<PathBuf>)> {
+    let paths = list_run_paths_in(dir, offset.saturating_add(limit))?;
+    let mut out = Vec::with_capacity(limit.min(paths.len()));
+    let mut skipped = Vec::new();
+    for p in paths.into_iter().skip(offset) {
+        match std::fs::read(&p) {
+            Ok(data) => match serde_json::from_slice::<RunResult>(&data) {
+                Ok(r) => out.push(r),
+                Err(_) => skipped.push(p),
+            },
+            Err(_) => skipped.push(p),
+        }
     }
-    Ok(out)
+    Ok((out, skipped))
 }
 
-/// Load all saved runs, newest first.
-pub fn load_all() -> Result<Vec<RunResult>> {
-    load_recent(usize::MAX)
+fn load_runs_from(dir: &Path, limit: usize) -> Result<(Vec<RunResult>, Vec<PathBuf>)> {
+    load_runs_range_from(dir, 0, limit)
+}
+
+pub fn load_recent(limit: usize) -> Result<Vec<RunResult>> {
+    Ok(load_runs_from(&runs_dir(), limit)?.0)
+}
+
+/// Load `limit` runs starting `offset` entries into the newest-first
+/// ordering. Lets the History tab's lazy loading parse only the next chunk
+/// instead of re-parsing everything already in memory.
+pub fn load_recent_range(offset: usize, limit: usize) -> Result<Vec<RunResult>> {
+    Ok(load_runs_range_from(&runs_dir(), offset, limit)?.0)
+}
+
+/// Load all saved runs newest first, also reporting the files that were
+/// skipped as unreadable/corrupt so callers can warn instead of silently
+/// under-reporting.
+pub fn load_all_with_skipped() -> Result<(Vec<RunResult>, Vec<PathBuf>)> {
+    load_runs_from(&runs_dir(), usize::MAX)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::empty_run_result;
+
+    /// Fresh, unique directory under the OS temp dir for storage tests.
+    fn test_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "cloudflare-speed-cli-test-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn run_at(ts: &str, meas_id: &str) -> crate::model::RunResult {
+        let mut r = empty_run_result();
+        r.timestamp_utc = ts.into();
+        r.meas_id = meas_id.into();
+        r.base_url = "https://speed.cloudflare.com".into();
+        r
+    }
+
+    #[test]
+    fn load_runs_from_skips_corrupt_files() {
+        let dir = test_dir("skip-corrupt");
+        save_run_to(&dir, &run_at("2026-01-01T00:00:00Z", "aaa")).unwrap();
+        save_run_to(&dir, &run_at("2026-01-02T00:00:00Z", "bbb")).unwrap();
+        // Simulates a file truncated by a crash or full disk mid-write.
+        std::fs::write(dir.join("run-2026-01-03_00-00-00Z-ccc.json"), b"{\"trunc").unwrap();
+
+        let (runs, skipped) = load_runs_from(&dir, 10).unwrap();
+        assert_eq!(
+            runs.iter().map(|r| r.meas_id.as_str()).collect::<Vec<_>>(),
+            vec!["bbb", "aaa"]
+        );
+        assert_eq!(skipped.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_runs_range_parses_only_the_requested_slice() {
+        let dir = test_dir("range");
+        for (ts, id) in [
+            ("2026-01-01T00:00:00Z", "a"),
+            ("2026-01-02T00:00:00Z", "b"),
+            ("2026-01-03T00:00:00Z", "c"),
+            ("2026-01-04T00:00:00Z", "d"),
+            ("2026-01-05T00:00:00Z", "e"),
+        ] {
+            save_run_to(&dir, &run_at(ts, id)).unwrap();
+        }
+        // Newest-first ordering is e,d,c,b,a; offset 2, limit 2 -> c,b.
+        let (runs, skipped) = load_runs_range_from(&dir, 2, 2).unwrap();
+        assert!(skipped.is_empty());
+        assert_eq!(
+            runs.iter().map(|r| r.meas_id.as_str()).collect::<Vec<_>>(),
+            vec!["c", "b"]
+        );
+        // Offset past the end is an empty result, not an error.
+        assert!(load_runs_range_from(&dir, 10, 5).unwrap().0.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_run_to_roundtrips_without_leftover_temp_files() {
+        let dir = test_dir("roundtrip");
+        let r = run_at("2026-01-01T12:34:56Z", "abc123");
+        save_run_to(&dir, &r).unwrap();
+
+        // Exactly one file, and it is the final .json (no stray tmp files).
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 1, "unexpected files: {names:?}");
+        assert!(names[0].ends_with(".json"), "unexpected files: {names:?}");
+
+        let (runs, skipped) = load_runs_from(&dir, 10).unwrap();
+        assert!(skipped.is_empty());
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].meas_id, "abc123");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn csv_row_includes_p95_p99_columns() {
