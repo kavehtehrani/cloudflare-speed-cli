@@ -128,9 +128,8 @@ fn init_clipboard_manager() -> Result<&'static std_mpsc::Sender<String>> {
             #[cfg(target_os = "android")]
             for _ in rx {
                 // Clipboard not supported on Android.
-             }
-        }
-        );
+            }
+        });
 
         tx
     });
@@ -148,9 +147,7 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
     #[cfg(target_os = "android")]
     {
         let _ = text;
-        return Err(anyhow::anyhow!(
-            "Clipboard is not supported on Android"
-        ));
+        return Err(anyhow::anyhow!("Clipboard is not supported on Android"));
     }
 
     #[cfg(not(target_os = "android"))]

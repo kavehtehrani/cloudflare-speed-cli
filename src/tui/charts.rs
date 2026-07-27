@@ -152,7 +152,10 @@ fn render_metrics_text<'a>(
         if let Some(l) = loss {
             spans.push(Span::raw(" "));
             spans.push(Span::styled("loss", Style::default().fg(Color::Gray)));
-            spans.push(Span::styled(format!(" {:.1}%", l * 100.0), Style::default().fg(c)));
+            spans.push(Span::styled(
+                format!(" {:.1}%", l * 100.0),
+                Style::default().fg(c),
+            ));
         }
         Line::from(spans)
     } else {
@@ -171,6 +174,7 @@ fn render_metrics_text<'a>(
 }
 
 /// Helper function to render a throughput chart with metrics inside the same bordered box
+#[allow(clippy::too_many_arguments)]
 pub fn render_chart_with_metrics_inside(
     f: &mut Frame,
     area: Rect,
@@ -315,7 +319,7 @@ pub fn draw_charts(area: Rect, f: &mut Frame, state: &UiState) {
     // Chart width = chunks[1].width - Y-axis label width (6) - borders (2)
     let available_chart_width = chunks[1].width.saturating_sub(8) as usize;
     // Cap at 200 bars max for performance, but allow wider bars on ultra-wide screens
-    let max_bars = available_chart_width.max(1).min(200);
+    let max_bars = available_chart_width.clamp(1, 200);
 
     // Prepare data for charts: take only as many as can fit, then reverse so oldest is on left, newest on right
     let data_points: Vec<_> = filtered_data
@@ -383,11 +387,9 @@ pub fn draw_charts(area: Rect, f: &mut Frame, state: &UiState) {
 
     // Recalculate bar width for the actual chart area
     let dl_chart_width = dl_layout[1].width.saturating_sub(2) as usize;
-    let dl_bar_width = if num_bars > 0 {
-        (dl_chart_width / num_bars).max(1) as u16
-    } else {
-        1
-    };
+    let dl_bar_width = dl_chart_width
+        .checked_div(num_bars)
+        .map_or(1, |w| w.max(1) as u16);
 
     // Y-axis labels for download - offset by 1 at top/bottom to align with chart's inner area
     let dl_label_layout = Layout::default()
@@ -442,11 +444,9 @@ pub fn draw_charts(area: Rect, f: &mut Frame, state: &UiState) {
 
     // Recalculate bar width for upload chart area
     let ul_chart_width = ul_layout[1].width.saturating_sub(2) as usize;
-    let ul_bar_width = if num_bars > 0 {
-        (ul_chart_width / num_bars).max(1) as u16
-    } else {
-        1
-    };
+    let ul_bar_width = ul_chart_width
+        .checked_div(num_bars)
+        .map_or(1, |w| w.max(1) as u16);
 
     // Y-axis labels for upload - offset by 1 at top/bottom to align with chart's inner area
     let ul_label_layout = Layout::default()

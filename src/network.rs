@@ -67,9 +67,9 @@ pub struct NetworkInfo {
 pub fn gather_network_info(args: &Cli) -> NetworkInfo {
     // Determine the interface: explicit --interface, reverse-lookup from --source, or auto-detect
     let resolved_iface = args.interface.clone().or_else(|| {
-        args.source.as_ref().and_then(|ip| {
-            crate::engine::network_bind::get_interface_for_ip(ip)
-        })
+        args.source
+            .as_ref()
+            .and_then(|ip| crate::engine::network_bind::get_interface_for_ip(ip))
     });
 
     let (interface_name, network_name, is_wireless, interface_mac) =
@@ -213,8 +213,7 @@ fn parse_default_iface_from_netstat_json(json: &str, family: Option<IpFamily>) -
         None => matches!(af, Some("Internet" | "Internet6")),
     };
 
-    let families =
-        v["statistics"]["route-information"]["route-table"]["rt-family"].as_array()?;
+    let families = v["statistics"]["route-information"]["route-table"]["rt-family"].as_array()?;
 
     for family_entry in families {
         if af_matches(family_entry["address-family"].as_str()) {
@@ -379,9 +378,7 @@ fn check_if_wireless(iface: &str) -> Option<bool> {
         .ok()?;
     let output_str = String::from_utf8(output.stdout).ok()?;
 
-    let is_wireless = output_str
-        .lines()
-        .any(|line| line.trim() == iface);
+    let is_wireless = output_str.lines().any(|line| line.trim() == iface);
 
     Some(is_wireless)
 }
@@ -417,7 +414,12 @@ fn check_if_wireless(iface: &str) -> Option<bool> {
     for line in output_str.lines() {
         let line = line.trim();
         if line.starts_with("Hardware Port:") {
-            let port_name = line.splitn(2, ':').nth(1).unwrap_or("").trim().to_lowercase();
+            let port_name = line
+                .splitn(2, ':')
+                .nth(1)
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
             is_wifi_section = port_name.contains("wi-fi") || port_name.contains("airport");
         } else if line.starts_with("Device:") {
             if let Some(device) = line.splitn(2, ':').nth(1) {
@@ -460,7 +462,7 @@ fn get_wireless_ssid(iface: &str) -> Option<String> {
     }
 
     // Fallback: try iw command
-    if let Ok(output) = Command::new("iw").args(&["dev", iface, "info"]).output() {
+    if let Ok(output) = Command::new("iw").args(["dev", iface, "info"]).output() {
         if let Ok(output_str) = String::from_utf8(output.stdout) {
             for line in output_str.lines() {
                 if line.trim().starts_with("ssid ") {
@@ -478,10 +480,7 @@ fn get_wireless_ssid(iface: &str) -> Option<String> {
 
 #[cfg(target_os = "freebsd")]
 fn get_wireless_ssid(iface: &str) -> Option<String> {
-    let output = Command::new("ifconfig")
-        .arg(iface)
-        .output()
-        .ok()?;
+    let output = Command::new("ifconfig").arg(iface).output().ok()?;
 
     if !output.status.success() {
         return None;
@@ -725,10 +724,8 @@ fn get_interface_ips(interface_name: Option<&str>) -> (Option<String>, Option<St
             if_addrs::IfAddr::V6(ref addr) => {
                 // Skip link-local addresses (fe80::)
                 let ip = addr.ip;
-                if !ip.is_loopback() && !is_link_local_v6(&ip) {
-                    if ipv6.is_none() {
-                        ipv6 = Some(ip.to_string());
-                    }
+                if !ip.is_loopback() && !is_link_local_v6(&ip) && ipv6.is_none() {
+                    ipv6 = Some(ip.to_string());
                 }
             }
         }
@@ -804,19 +801,15 @@ mod tests {
 
     #[test]
     fn freebsd_picks_ipv4_default_iface() {
-        let iface = parse_default_iface_from_netstat_json(
-            NETSTAT_SEPARATE_IFACES,
-            Some(IpFamily::V4),
-        );
+        let iface =
+            parse_default_iface_from_netstat_json(NETSTAT_SEPARATE_IFACES, Some(IpFamily::V4));
         assert_eq!(iface.as_deref(), Some("em0"));
     }
 
     #[test]
     fn freebsd_picks_ipv6_default_iface() {
-        let iface = parse_default_iface_from_netstat_json(
-            NETSTAT_SEPARATE_IFACES,
-            Some(IpFamily::V6),
-        );
+        let iface =
+            parse_default_iface_from_netstat_json(NETSTAT_SEPARATE_IFACES, Some(IpFamily::V6));
         assert_eq!(iface.as_deref(), Some("em1"));
     }
 

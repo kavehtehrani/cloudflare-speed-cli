@@ -248,14 +248,30 @@ pub async fn fetch_external_ips(
     let (ipv4, ipv6) = tokio::join!(
         async {
             if want_v4 {
-                fetch_external_ip_version(&url, &hostname, IpVersion::V4, interface, bind_ip, cert_path).await
+                fetch_external_ip_version(
+                    &url,
+                    &hostname,
+                    IpVersion::V4,
+                    interface,
+                    bind_ip,
+                    cert_path,
+                )
+                .await
             } else {
                 None
             }
         },
         async {
             if want_v6 {
-                fetch_external_ip_version(&url, &hostname, IpVersion::V6, interface, bind_ip, cert_path).await
+                fetch_external_ip_version(
+                    &url,
+                    &hostname,
+                    IpVersion::V6,
+                    interface,
+                    bind_ip,
+                    cert_path,
+                )
+                .await
             } else {
                 None
             }

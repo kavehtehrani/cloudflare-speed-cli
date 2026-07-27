@@ -80,15 +80,16 @@ pub fn draw_dashboard_compact(area: Rect, f: &mut Frame, state: &UiState) {
         .split(content[1]);
 
     // Idle latency stats text box
-    let idle_lat = if state.latency.idle_latency_samples.is_empty() && state.latency.idle_latency_sent == 0 {
-        None
-    } else {
-        Some(UiState::compute_live_latency_stats(
-            &state.latency.idle_latency_samples,
-            state.latency.idle_latency_sent,
-            state.latency.idle_latency_received,
-        ))
-    };
+    let idle_lat =
+        if state.latency.idle_latency_samples.is_empty() && state.latency.idle_latency_sent == 0 {
+            None
+        } else {
+            Some(UiState::compute_live_latency_stats(
+                &state.latency.idle_latency_samples,
+                state.latency.idle_latency_sent,
+                state.latency.idle_latency_received,
+            ))
+        };
     let format_latency = |lat: &crate::model::LatencySummary| -> Vec<Line> {
         vec![
             Line::from(vec![
@@ -132,7 +133,13 @@ pub fn draw_dashboard_compact(area: Rect, f: &mut Frame, state: &UiState) {
         ]),
         Line::from(vec![
             Span::styled("Interface: ", Style::default().fg(Color::Gray)),
-            Span::raw(show_or_redact(state.network.interface_name.as_deref(), state.hide_network_info).to_string()),
+            Span::raw(
+                show_or_redact(
+                    state.network.interface_name.as_deref(),
+                    state.hide_network_info,
+                )
+                .to_string(),
+            ),
             Span::raw(" ("),
             Span::raw(if state.network.is_wireless.unwrap_or(false) {
                 "Wireless"
@@ -150,7 +157,7 @@ pub fn draw_dashboard_compact(area: Rect, f: &mut Frame, state: &UiState) {
                     .network
                     .network_name
                     .as_deref()
-                    .or_else(|| state.network.interface_name.as_deref())
+                    .or(state.network.interface_name.as_deref())
                     .unwrap_or("-")
                     .to_string()
             }),
@@ -212,13 +219,22 @@ pub fn draw_dashboard_compact(area: Rect, f: &mut Frame, state: &UiState) {
         .and_then(|r| r.experimental_udp.as_ref())
     {
         let label_color = quality_label_color(&exp.quality_label);
-        let mos_str = exp.mos.map(|m| format!(" MOS {:.1}", m)).unwrap_or_default();
+        let mos_str = exp
+            .mos
+            .map(|m| format!(" MOS {:.1}", m))
+            .unwrap_or_default();
         meta_lines.push(Line::from(vec![
             Span::styled("UDP: ", Style::default().fg(Color::Gray)),
             Span::styled(&exp.quality_label, Style::default().fg(label_color)),
             Span::styled(mos_str, Style::default().fg(label_color)),
-            Span::styled(format!(" loss {:.1}%", exp.latency.loss * 100.0), Style::default().fg(Color::Yellow)),
-            Span::styled(format!(" reorder {:.1}%", exp.out_of_order_pct), Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!(" loss {:.1}%", exp.latency.loss * 100.0),
+                Style::default().fg(Color::Yellow),
+            ),
+            Span::styled(
+                format!(" reorder {:.1}%", exp.out_of_order_pct),
+                Style::default().fg(Color::Gray),
+            ),
         ]));
         meta_lines.push(udp_split_bar(exp.latency.sent, exp.latency.received, 12));
     }
@@ -242,10 +258,12 @@ pub fn draw_dashboard_compact(area: Rect, f: &mut Frame, state: &UiState) {
             .borders(Borders::ALL)
             .title("Network Information")
             .title_bottom(
-                Line::from(Span::styled(hide_hint, Style::default().fg(Color::DarkGray)))
-                    .right_aligned(),
+                Line::from(Span::styled(
+                    hide_hint,
+                    Style::default().fg(Color::DarkGray),
+                ))
+                .right_aligned(),
             ),
     );
     f.render_widget(meta, bottom_row[1]);
 }
-

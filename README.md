@@ -4,6 +4,7 @@
 
 # cloudflare-speed-cli
 
+[![CI](https://github.com/kavehtehrani/cloudflare-speed-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/kavehtehrani/cloudflare-speed-cli/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/cloudflare-speed-cli.svg)](https://crates.io/crates/cloudflare-speed-cli)
 [![Rust](https://img.shields.io/badge/rust-1.81+-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)

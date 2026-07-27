@@ -14,9 +14,7 @@ use ratatui::{
 use super::super::charts;
 use super::super::log_style;
 use super::super::state::{push_wrapped_status_kv, UiState, REDACTED_PLACEHOLDER};
-use super::{
-    external_ip_for_family, max_y, quality_label_color, redact_log_line, show_or_redact,
-};
+use super::{external_ip_for_family, max_y, quality_label_color, redact_log_line, show_or_redact};
 
 pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
     let main = Layout::default()
@@ -42,8 +40,18 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
     // Download throughput chart (left) - only show when download phase has data
     if state.throughput.dl_phase_start.is_some() && !state.throughput.dl_points.is_empty() {
         // Calculate x bounds only for download points
-        let dl_x_max = state.throughput.dl_points.last().map(|(x, _)| *x).unwrap_or(0.0);
-        let dl_x_min = state.throughput.dl_points.first().map(|(x, _)| *x).unwrap_or(0.0);
+        let dl_x_max = state
+            .throughput
+            .dl_points
+            .last()
+            .map(|(x, _)| *x)
+            .unwrap_or(0.0);
+        let dl_x_min = state
+            .throughput
+            .dl_points
+            .first()
+            .map(|(x, _)| *x)
+            .unwrap_or(0.0);
 
         let y_dl_max = max_y(&state.throughput.dl_points).max(10.0);
         let y_dl_max = (y_dl_max * 1.10).min(10_000.0);
@@ -58,7 +66,9 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
         let dl_values: Vec<f64> = state.throughput.dl_points.iter().map(|(_, y)| *y).collect();
         let dl_metrics = crate::metrics::compute_sample_metrics(&dl_values);
         // Use the computed mean from metrics for the title to match what's shown below
-        let dl_avg = dl_metrics.map(|m| m.mean).unwrap_or(state.throughput.dl_avg_mbps);
+        let dl_avg = dl_metrics
+            .map(|m| m.mean)
+            .unwrap_or(state.throughput.dl_avg_mbps);
         let dl_title = Line::from(vec![
             Span::raw("Download (inst "),
             Span::styled(
@@ -104,8 +114,18 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
     // Upload throughput chart (right) - only show when upload phase has data
     if state.throughput.ul_phase_start.is_some() && !state.throughput.ul_points.is_empty() {
         // Calculate x bounds only for upload points
-        let ul_x_max = state.throughput.ul_points.last().map(|(x, _)| *x).unwrap_or(0.0);
-        let ul_x_min = state.throughput.ul_points.first().map(|(x, _)| *x).unwrap_or(0.0);
+        let ul_x_max = state
+            .throughput
+            .ul_points
+            .last()
+            .map(|(x, _)| *x)
+            .unwrap_or(0.0);
+        let ul_x_min = state
+            .throughput
+            .ul_points
+            .first()
+            .map(|(x, _)| *x)
+            .unwrap_or(0.0);
 
         let y_ul_max = max_y(&state.throughput.ul_points).max(10.0);
         let y_ul_max = (y_ul_max * 1.10).min(10_000.0);
@@ -120,7 +140,9 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
         let ul_values: Vec<f64> = state.throughput.ul_points.iter().map(|(_, y)| *y).collect();
         let ul_metrics = crate::metrics::compute_sample_metrics(&ul_values);
         // Use the computed mean from metrics for the title to match what's shown below
-        let ul_avg = ul_metrics.map(|m| m.mean).unwrap_or(state.throughput.ul_avg_mbps);
+        let ul_avg = ul_metrics
+            .map(|m| m.mean)
+            .unwrap_or(state.throughput.ul_avg_mbps);
         let ul_title = Line::from(vec![
             Span::raw("Upload (inst "),
             Span::styled(
@@ -202,9 +224,10 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
     // Download latency
     if !state.latency.loaded_dl_latency_samples.is_empty() {
         // Use the same median calculation as the metrics below
-        let median = crate::metrics::compute_sample_metrics(&state.latency.loaded_dl_latency_samples)
-            .map(|m| m.median)
-            .unwrap_or(f64::NAN);
+        let median =
+            crate::metrics::compute_sample_metrics(&state.latency.loaded_dl_latency_samples)
+                .map(|m| m.median)
+                .unwrap_or(f64::NAN);
         let jitter = crate::metrics::compute_jitter(&state.latency.loaded_dl_latency_samples);
         let title = Line::from(vec![
             Span::raw("Latency Download ("),
@@ -235,9 +258,10 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
     // Upload latency
     if !state.latency.loaded_ul_latency_samples.is_empty() {
         // Use the same median calculation as the metrics below
-        let median = crate::metrics::compute_sample_metrics(&state.latency.loaded_ul_latency_samples)
-            .map(|m| m.median)
-            .unwrap_or(f64::NAN);
+        let median =
+            crate::metrics::compute_sample_metrics(&state.latency.loaded_ul_latency_samples)
+                .map(|m| m.median)
+                .unwrap_or(f64::NAN);
         let jitter = crate::metrics::compute_jitter(&state.latency.loaded_ul_latency_samples);
         let title = Line::from(vec![
             Span::raw("Latency Upload ("),
@@ -309,7 +333,10 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
     {
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("Packet loss probe failed: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    "Packet loss probe failed: ",
+                    Style::default().fg(Color::Gray),
+                ),
                 Span::styled(err.as_str(), Style::default().fg(Color::Yellow)),
             ])),
             udp_inner,
@@ -332,7 +359,11 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
             .map(|exp| {
                 let label = exp.quality_label.as_str();
                 let mos = exp.mos.map(|m| format!("MOS {:.1}", m)).unwrap_or_default();
-                let jitter = exp.latency.jitter_ms.map(|j| format!("jitter {:.1}ms", j)).unwrap_or_default();
+                let jitter = exp
+                    .latency
+                    .jitter_ms
+                    .map(|j| format!("jitter {:.1}ms", j))
+                    .unwrap_or_default();
                 let reorder = format!("reorder {:.1}%", exp.out_of_order_pct);
                 (label, mos, jitter, reorder)
             })
@@ -379,11 +410,14 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
 
         // Ensure any loss shows at least one red segment
         let lost_units = if lost > 0 {
-            ((lost as f64 / safe_total as f64) * bar_width as f64).ceil().max(1.0) as usize
+            ((lost as f64 / safe_total as f64) * bar_width as f64)
+                .ceil()
+                .max(1.0) as usize
         } else {
             0
         };
-        let recv_units = ((safe_received as f64 / safe_total as f64) * bar_width as f64).floor() as usize;
+        let recv_units =
+            ((safe_received as f64 / safe_total as f64) * bar_width as f64).floor() as usize;
         let pending_units = bar_width.saturating_sub(recv_units + lost_units);
 
         let bar_recv = "█".repeat(recv_units);
@@ -398,7 +432,10 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
         // Show quality label and MOS when test is complete
         if !quality_label.is_empty() {
             let label_color = quality_label_color(quality_label);
-            spans.push(Span::styled(quality_label, Style::default().fg(label_color)));
+            spans.push(Span::styled(
+                quality_label,
+                Style::default().fg(label_color),
+            ));
             if !mos_str.is_empty() {
                 spans.push(Span::raw(" ("));
                 spans.push(Span::styled(&mos_str, Style::default().fg(label_color)));
@@ -411,7 +448,13 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
         spans.extend(vec![
             Span::styled(
                 loss_str,
-                Style::default().fg(if udp_loss_pct == 0.0 { Color::Green } else if udp_loss_pct < 2.5 { Color::Yellow } else { Color::Red }),
+                Style::default().fg(if udp_loss_pct == 0.0 {
+                    Color::Green
+                } else if udp_loss_pct < 2.5 {
+                    Color::Yellow
+                } else {
+                    Color::Red
+                }),
             ),
             Span::raw(" "),
             Span::styled(rtt_display, Style::default().fg(Color::Gray)),
@@ -439,13 +482,13 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
         ]);
 
         if pending > 0 {
-            spans.push(Span::styled(format!(" pending {}", pending), Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                format!(" pending {}", pending),
+                Style::default().fg(Color::DarkGray),
+            ));
         }
 
-        f.render_widget(
-            Paragraph::new(Line::from(spans)),
-            udp_inner,
-        );
+        f.render_widget(Paragraph::new(Line::from(spans)), udp_inner);
     } else {
         let msg = if state.phase == crate::model::Phase::PacketLoss {
             "Packet loss probe starting..."
@@ -492,7 +535,7 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
             .network
             .network_name
             .as_deref()
-            .or_else(|| state.network.interface_name.as_deref())
+            .or(state.network.interface_name.as_deref())
             .unwrap_or("-")
             .to_string()
     };
@@ -557,9 +600,15 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
             Style::default().fg(Color::Cyan),
         ));
     } else {
-        match (state.network.as_org.as_deref(), state.network.asn.as_deref()) {
+        match (
+            state.network.as_org.as_deref(),
+            state.network.asn.as_deref(),
+        ) {
             (Some(org), Some(asn)) => {
-                your_network.push(Span::styled(org.to_string(), Style::default().fg(Color::Cyan)));
+                your_network.push(Span::styled(
+                    org.to_string(),
+                    Style::default().fg(Color::Cyan),
+                ));
                 your_network.push(Span::raw(" ("));
                 your_network.push(Span::styled(
                     format!("AS{}", asn),
@@ -568,7 +617,10 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
                 your_network.push(Span::raw(")"));
             }
             (Some(org), None) => {
-                your_network.push(Span::styled(org.to_string(), Style::default().fg(Color::Cyan)));
+                your_network.push(Span::styled(
+                    org.to_string(),
+                    Style::default().fg(Color::Cyan),
+                ));
             }
             (None, Some(asn)) => {
                 your_network.push(Span::styled(
@@ -683,10 +735,7 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
             };
             network_lines.push(Line::from(vec![
                 Span::styled("Traceroute: ", Style::default().fg(Color::Gray)),
-                Span::styled(
-                    tr.hops.len().to_string(),
-                    Style::default().fg(Color::Cyan),
-                ),
+                Span::styled(tr.hops.len().to_string(), Style::default().fg(Color::Cyan)),
                 Span::styled(" hops (", Style::default().fg(Color::Gray)),
                 Span::styled(status, Style::default().fg(status_color)),
                 Span::styled(")", Style::default().fg(Color::Gray)),
@@ -715,8 +764,11 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
             .borders(Borders::ALL)
             .title("Network Information")
             .title_bottom(
-                Line::from(Span::styled(hide_hint, Style::default().fg(Color::DarkGray)))
-                    .right_aligned(),
+                Line::from(Span::styled(
+                    hide_hint,
+                    Style::default().fg(Color::DarkGray),
+                ))
+                .right_aligned(),
             ),
     );
     f.render_widget(network_info, info_row[0]);
@@ -742,8 +794,11 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
         .borders(Borders::ALL)
         .title(title)
         .title_bottom(
-            Line::from(Span::styled(hide_hint, Style::default().fg(Color::DarkGray)))
-                .right_aligned(),
+            Line::from(Span::styled(
+                hide_hint,
+                Style::default().fg(Color::DarkGray),
+            ))
+            .right_aligned(),
         );
     let inner = panel.inner(info_row[1]);
     let visible_rows = inner.height as usize;
@@ -878,4 +933,3 @@ pub fn draw_dashboard_full(area: Rect, f: &mut Frame, state: &UiState) {
         Paragraph::new(status_lines).block(Block::default().borders(Borders::ALL).title("Status"));
     f.render_widget(status, main[4]);
 }
-

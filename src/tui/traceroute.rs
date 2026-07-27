@@ -69,8 +69,8 @@ pub fn draw_traceroute(area: Rect, f: &mut Frame, state: &UiState) {
         ]));
     }
 
-    let widget = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("Traceroute"));
+    let widget =
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Traceroute"));
     f.render_widget(widget, area);
 }
 

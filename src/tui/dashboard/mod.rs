@@ -11,7 +11,7 @@ use std::borrow::Cow;
 /// Returns `REDACTED_PLACEHOLDER` when `hide` is true, otherwise `value` or `"-"` for `None`.
 /// Used to conceal identifying network info (IP, MAC, SSID, ISP, location) for
 /// screenshot/demo sharing without altering stored history.
-pub(super) fn show_or_redact<'a>(value: Option<&'a str>, hide: bool) -> &'a str {
+pub(super) fn show_or_redact(value: Option<&str>, hide: bool) -> &str {
     if hide {
         REDACTED_PLACEHOLDER
     } else {
@@ -181,7 +181,9 @@ pub(super) fn udp_split_bar(sent: u64, received: u64, width: usize) -> Line<'sta
     let lost = safe_sent.saturating_sub(safe_received);
     // Ensure any loss shows at least one red segment
     let lost_units = if lost > 0 {
-        (width as f64 * lost as f64 / safe_sent as f64).ceil().max(1.0) as usize
+        (width as f64 * lost as f64 / safe_sent as f64)
+            .ceil()
+            .max(1.0) as usize
     } else {
         0
     };
@@ -196,7 +198,10 @@ pub(super) fn udp_split_bar(sent: u64, received: u64, width: usize) -> Line<'sta
         Span::styled(ok_part, Style::default().fg(Color::Green)),
         Span::styled(lost_part, Style::default().fg(Color::Red)),
         Span::raw("] "),
-        Span::styled(format!("ok {} lost {}", safe_received, lost), Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("ok {} lost {}", safe_received, lost),
+            Style::default().fg(Color::Gray),
+        ),
     ])
 }
 
@@ -210,7 +215,6 @@ pub(super) fn quality_label_color(label: &str) -> Color {
         _ => Color::Gray,
     }
 }
-
 
 mod compact;
 mod full;
@@ -263,7 +267,10 @@ mod tests {
     fn external_ip_ignores_meta_ip_of_other_family() {
         // --ipv6-only: the v4 probe is skipped and the meta client IP is the
         // IPv6 address; it must not appear on the IPv4 row (issue #49).
-        assert_eq!(external_ip_for_family(None, Some("2001:db8::1"), true), None);
+        assert_eq!(
+            external_ip_for_family(None, Some("2001:db8::1"), true),
+            None
+        );
         assert_eq!(external_ip_for_family(None, Some("1.2.3.4"), false), None);
     }
 
