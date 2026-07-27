@@ -12,6 +12,29 @@ pub const META_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// the overall request timeout.
 pub const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Fraction of a throughput phase treated as ramp-up (TCP slow start / buffer
+/// fill) and excluded from steady-state reporting and stability CV.
+pub const STEADY_STATE_RAMP_FRACTION: f64 = 0.20;
+
+/// Minimum ramp-up exclusion regardless of phase length.
+pub const STEADY_STATE_MIN_RAMP: Duration = Duration::from_secs(1);
+
+/// Poll cadence while a phase or worker waits for a pause to lift.
+pub const PAUSE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Backoff after a failed throughput request so an unreachable server does
+/// not turn the workers into a hot loop.
+pub const WORKER_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Per-probe response deadline for the UDP loss probe.
+pub const UDP_PROBE_TIMEOUT: Duration = Duration::from_millis(600);
+
+/// Delay between UDP loss probes.
+pub const UDP_PROBE_INTERVAL: Duration = Duration::from_millis(80);
+
+/// Latency probes per family in the IPv4-vs-IPv6 comparison (median reported).
+pub const IP_COMPARISON_LATENCY_PROBES: usize = 5;
+
 /// Waveform-style bufferbloat thresholds: (max latency increase in ms, grade).
 /// The first row whose threshold the measured value is <= to wins.
 /// `f64::INFINITY` serves as the catch-all for F.

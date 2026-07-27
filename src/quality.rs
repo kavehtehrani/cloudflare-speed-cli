@@ -1,7 +1,10 @@
 //! Pure functions that turn measured numbers into Connection Quality grades.
 //! No I/O, no global state. See docs/superpowers/specs/2026-05-24-connection-quality-design.md.
 
-use crate::constants::{BUFFERBLOAT_THRESHOLDS, GRADE_UNAVAILABLE, MIN_STABILITY_SAMPLES, STABILITY_THRESHOLDS};
+use crate::constants::{
+    BUFFERBLOAT_THRESHOLDS, GRADE_UNAVAILABLE, MIN_STABILITY_SAMPLES, STABILITY_THRESHOLDS,
+    STEADY_STATE_MIN_RAMP, STEADY_STATE_RAMP_FRACTION,
+};
 use crate::model::{ConnectionQuality, RunResult};
 
 /// Map a latency-increase-under-load value (ms) to a Waveform grade.
@@ -44,6 +47,23 @@ pub fn cv_percent(samples: &[f64]) -> Option<f64> {
     Some(var.sqrt() / mean * 100.0)
 }
 
+/// Drops the ramp-up prefix from a throughput point series `(t_secs, mbps)`:
+/// everything within max(`STEADY_STATE_RAMP_FRACTION` x span,
+/// `STEADY_STATE_MIN_RAMP`) of the first point, so TCP slow start does not
+/// read as instability.
+fn steady_points(points: &[(f64, f64)]) -> &[(f64, f64)] {
+    let (Some((t_first, _)), Some((t_last, _))) = (points.first(), points.last()) else {
+        return points;
+    };
+    let span = t_last - t_first;
+    let cutoff =
+        t_first + (span * STEADY_STATE_RAMP_FRACTION).max(STEADY_STATE_MIN_RAMP.as_secs_f64());
+    match points.iter().position(|(t, _)| *t >= cutoff) {
+        Some(i) => &points[i..],
+        None => &[],
+    }
+}
+
 /// Build `ConnectionQuality` from a finished `RunResult` and the per-second
 /// throughput sample vectors recorded during the run. Returns `None` only if
 /// neither bufferbloat nor stability can be computed.
@@ -73,9 +93,9 @@ pub fn compute(
         None => None,
     };
 
-    // Stability: worst-of available directions.
-    let dl_mbps: Vec<f64> = dl_points.iter().map(|(_, m)| *m).collect();
-    let ul_mbps: Vec<f64> = ul_points.iter().map(|(_, m)| *m).collect();
+    // Stability: worst-of available directions, over steady-state samples only.
+    let dl_mbps: Vec<f64> = steady_points(dl_points).iter().map(|(_, m)| *m).collect();
+    let ul_mbps: Vec<f64> = steady_points(ul_points).iter().map(|(_, m)| *m).collect();
     let cv_dl = cv_percent(&dl_mbps);
     let cv_ul = cv_percent(&ul_mbps);
     let cv_worst = match (cv_dl, cv_ul) {
@@ -114,14 +134,26 @@ mod tests {
 
     fn make_result(idle_med: Option<f64>, dl_med: Option<f64>, ul_med: Option<f64>) -> RunResult {
         let mut r = empty_run_result();
-        r.idle_latency = LatencySummary { median_ms: idle_med, ..Default::default() };
-        r.loaded_latency_download = LatencySummary { median_ms: dl_med, ..Default::default() };
-        r.loaded_latency_upload = LatencySummary { median_ms: ul_med, ..Default::default() };
+        r.idle_latency = LatencySummary {
+            median_ms: idle_med,
+            ..Default::default()
+        };
+        r.loaded_latency_download = LatencySummary {
+            median_ms: dl_med,
+            ..Default::default()
+        };
+        r.loaded_latency_upload = LatencySummary {
+            median_ms: ul_med,
+            ..Default::default()
+        };
         r
     }
 
     fn pts(mbps: &[f64]) -> Vec<(f64, f64)> {
-        mbps.iter().enumerate().map(|(i, m)| (i as f64, *m)).collect()
+        mbps.iter()
+            .enumerate()
+            .map(|(i, m)| (i as f64, *m))
+            .collect()
     }
 
     #[test]
@@ -158,7 +190,12 @@ mod tests {
         // Worst = 30ms = A.
         let r = make_result(Some(20.0), Some(25.0), Some(50.0));
         // Steady ~100Mbps download, ~8.5% CV upload (mean 98, stddev ~8.37).
-        let cq = compute(&r, &pts(&[100.0; 5]), &pts(&[90.0, 100.0, 110.0, 100.0, 90.0])).unwrap();
+        let cq = compute(
+            &r,
+            &pts(&[100.0; 5]),
+            &pts(&[90.0, 100.0, 110.0, 100.0, 90.0]),
+        )
+        .unwrap();
         assert_eq!(cq.bufferbloat_grade, "A");
         assert!((cq.bufferbloat_ms.unwrap() - 30.0).abs() < 0.01);
         assert!(cq.stability_cv_download_pct.unwrap() < 0.01);
@@ -166,6 +203,17 @@ mod tests {
         // Worst-of stability: upload wins.
         assert!((cq.stability_cv_pct.unwrap() - cq.stability_cv_upload_pct.unwrap()).abs() < 0.01);
         assert_eq!(cq.stability_grade, "B");
+    }
+
+    #[test]
+    fn stability_ignores_ramp_up_prefix() {
+        let r = make_result(None, Some(100.0), Some(100.0));
+        // 10 per-second points: TCP ramp for the first 2s, rock-steady after.
+        // A stable link must not be graded down for its slow start.
+        let mut points = vec![(0.0, 5.0), (1.0, 50.0)];
+        points.extend((2..10).map(|i| (i as f64, 100.0)));
+        let cq = compute(&r, &points, &points).unwrap();
+        assert_eq!(cq.stability_grade, "A", "cv={:?}", cq.stability_cv_pct);
     }
 
     #[test]
