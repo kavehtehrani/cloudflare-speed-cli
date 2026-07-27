@@ -44,8 +44,39 @@ use history::{
 };
 use state::update_available_networks;
 
+/// Puts the user's shell back in order: raw mode off, alternate screen left.
+/// Safe to call more than once.
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(io::stdout(), LeaveAlternateScreen);
+}
+
+/// Restores the terminal on drop, so every exit path out of `run` (normal
+/// return, `?` early return, or panic unwinding) leaves the shell usable
+/// instead of stuck in raw mode inside the alternate screen.
+struct TerminalRestoreGuard;
+
+impl Drop for TerminalRestoreGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}
+
 pub async fn run(args: Cli) -> Result<()> {
+    // Restore the terminal before the panic message prints; otherwise it
+    // lands invisible inside the alternate screen and the shell needs `reset`.
+    // Every panic is then fatal: the hook fires for spawned-task panics too,
+    // and once the terminal is restored the TUI must not keep drawing into
+    // the primary screen, so exit instead of limping on.
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        original_hook(info);
+        std::process::exit(1);
+    }));
+
     enable_raw_mode().context("enable raw mode")?;
+    let _restore_guard = TerminalRestoreGuard;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).ok();
 
@@ -515,10 +546,8 @@ pub async fn run(args: Cli) -> Result<()> {
         }
     };
 
-    // Restore terminal.
-    disable_raw_mode().ok();
-    let mut stdout = io::stdout();
-    execute!(stdout, LeaveAlternateScreen).ok();
+    // _restore_guard's Drop restores the terminal here and on every early
+    // return above.
     res
 }
 
