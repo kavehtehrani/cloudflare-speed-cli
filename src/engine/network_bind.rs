@@ -199,6 +199,20 @@ pub fn apply_bind(
     builder
 }
 
+/// Route a reqwest client builder through `--proxy`, if set.
+pub fn apply_proxy(builder: ClientBuilder, proxy_url: Option<&str>) -> Result<ClientBuilder> {
+    let Some(proxy_url) = proxy_url else {
+        return Ok(builder);
+    };
+    let proxy = reqwest::Proxy::all(proxy_url).with_context(|| {
+        format!(
+            "invalid proxy URL '{}'. Expected format: [protocol://]host[:port]",
+            proxy_url
+        )
+    })?;
+    Ok(builder.proxy(proxy))
+}
+
 /// Bind an already-created socket to a network interface by name: Linux uses
 /// `SO_BINDTODEVICE`, macOS uses `IP_BOUND_IF`/`IPV6_BOUND_IF` (chosen by
 /// `is_ipv6`). A no-op on every other platform (where the caller instead binds

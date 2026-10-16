@@ -243,6 +243,7 @@ impl TestEngine {
                 &self.cfg.base_url,
                 self.cfg.interface.as_deref(),
                 self.cfg.resolved_bind_ip,
+                self.cfg.proxy.as_deref(),
                 self.cfg.certificate_path.as_deref(),
                 family,
             )

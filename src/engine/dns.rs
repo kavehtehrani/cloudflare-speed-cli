@@ -225,10 +225,16 @@ pub fn extract_hostname(url: &str) -> Option<String> {
 /// When `family` restricts the run to one version (`--ipv4-only` /
 /// `--ipv6-only`), the other family's probe is skipped entirely rather than
 /// issued and left to time out.
+///
+/// With a `proxy`, Cloudflare sees the proxy's egress address, and the proxy
+/// (not us) picks the address family to the target, so per-family probes
+/// can't be pinned. A single request goes through the proxy instead and its
+/// address is filed under whichever family it turns out to be.
 pub async fn fetch_external_ips(
     base_url: &str,
     interface: Option<&str>,
-    bind_ip: Option<std::net::IpAddr>,
+    bind_ip: Option<IpAddr>,
+    proxy: Option<&str>,
     cert_path: Option<&std::path::Path>,
     family: Option<super::network_bind::IpFamily>,
 ) -> (Option<String>, Option<String>) {
@@ -239,8 +245,12 @@ pub async fn fetch_external_ips(
         None => return (None, None),
     };
 
-    // Resolve to get IPv4 and IPv6 addresses
     let url = format!("{}/__down?bytes=0", base_url);
+
+    if let Some(proxy) = proxy {
+        let ip = fetch_external_ip_via_proxy(&url, proxy, interface, bind_ip, cert_path).await;
+        return split_by_family(ip);
+    }
 
     let want_v4 = family != Some(IpFamily::V6);
     let want_v6 = family != Some(IpFamily::V4);
@@ -251,7 +261,7 @@ pub async fn fetch_external_ips(
                 fetch_external_ip_version(
                     &url,
                     &hostname,
-                    IpVersion::V4,
+                    IpFamily::V4,
                     interface,
                     bind_ip,
                     cert_path,
@@ -266,7 +276,7 @@ pub async fn fetch_external_ips(
                 fetch_external_ip_version(
                     &url,
                     &hostname,
-                    IpVersion::V6,
+                    IpFamily::V6,
                     interface,
                     bind_ip,
                     cert_path,
@@ -281,56 +291,76 @@ pub async fn fetch_external_ips(
     (ipv4, ipv6)
 }
 
-#[derive(Clone, Copy)]
-enum IpVersion {
-    V4,
-    V6,
-}
-
+/// Direct probe pinned to one address family by resolving the host ourselves.
 async fn fetch_external_ip_version(
     url: &str,
     hostname: &str,
-    version: IpVersion,
+    family: super::network_bind::IpFamily,
     interface: Option<&str>,
-    bind_ip: Option<std::net::IpAddr>,
+    bind_ip: Option<IpAddr>,
     cert_path: Option<&std::path::Path>,
 ) -> Option<String> {
-    use super::network_bind;
-    use std::net::SocketAddr;
-    use std::time::Duration;
-
-    // Resolve hostname to get IP addresses
     let lookup_target = format!("{}:443", hostname);
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host(&lookup_target)
+    let target_addr = tokio::net::lookup_host(&lookup_target)
         .await
         .ok()?
-        .collect();
+        .find(|addr| family.matches(addr.ip()))?;
 
-    // Find an address of the requested version
-    let target_addr = addrs.into_iter().find(|addr| match version {
-        IpVersion::V4 => addr.is_ipv4(),
-        IpVersion::V6 => addr.is_ipv6(),
-    })?;
-
-    // Build client that resolves to the specific IP
-    let mut builder = reqwest::Client::builder()
+    let client = probe_client_builder(interface, bind_ip, cert_path)?
         .resolve(hostname, target_addr)
-        .timeout(Duration::from_secs(5));
+        .build()
+        .ok()?;
+    fetch_meta_ip(&client, url).await
+}
+
+/// Probe through `--proxy`, returning the proxy's egress address.
+async fn fetch_external_ip_via_proxy(
+    url: &str,
+    proxy: &str,
+    interface: Option<&str>,
+    bind_ip: Option<IpAddr>,
+    cert_path: Option<&std::path::Path>,
+) -> Option<String> {
+    let builder = probe_client_builder(interface, bind_ip, cert_path)?;
+    let client = super::network_bind::apply_proxy(builder, Some(proxy))
+        .ok()?
+        .build()
+        .ok()?;
+    fetch_meta_ip(&client, url).await
+}
+
+/// Client builder shared by the external IP probes. `None` if the custom
+/// certificate can't be loaded.
+fn probe_client_builder(
+    interface: Option<&str>,
+    bind_ip: Option<IpAddr>,
+    cert_path: Option<&std::path::Path>,
+) -> Option<reqwest::ClientBuilder> {
+    let mut builder =
+        reqwest::Client::builder().timeout(crate::constants::EXTERNAL_IP_FETCH_TIMEOUT);
     if let Some(path) = cert_path {
         builder = builder.add_root_certificate(super::cert::load_reqwest_certificate(path).ok()?);
     }
-    let client = network_bind::apply_bind(builder, interface, bind_ip)
-        .build()
-        .ok()?;
+    Some(super::network_bind::apply_bind(builder, interface, bind_ip))
+}
 
-    // Make request and extract IP from response headers
+/// The client address Cloudflare reports in the `cf-meta-ip` response header.
+async fn fetch_meta_ip(client: &reqwest::Client, url: &str) -> Option<String> {
     let resp = client.get(url).send().await.ok()?;
-
-    // Extract IP from cf-meta-ip header
     resp.headers()
         .get("cf-meta-ip")
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string())
+}
+
+/// File an address under its family as (ipv4, ipv6). An unparseable address
+/// goes under neither.
+fn split_by_family(ip: Option<String>) -> (Option<String>, Option<String>) {
+    match ip.as_deref().and_then(|s| s.parse::<IpAddr>().ok()) {
+        Some(IpAddr::V4(_)) => (ip, None),
+        Some(IpAddr::V6(_)) => (None, ip),
+        None => (None, None),
+    }
 }
 
 #[cfg(test)]
@@ -348,5 +378,53 @@ mod tests {
             Some("example.com".to_string())
         );
         assert_eq!(extract_hostname("not a url"), None);
+    }
+
+    /// Stand-in for an HTTP forward proxy: answers one request with a fixed
+    /// `cf-meta-ip`, as Cloudflare would for the proxy's egress address.
+    /// Returns the proxy URL.
+    fn spawn_fake_proxy(egress_ip: &'static str) -> String {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut buf).unwrap();
+                if n == 0 {
+                    return;
+                }
+                head.extend_from_slice(&buf[..n]);
+            }
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncf-meta-ip: {}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                egress_ip
+            );
+            sock.write_all(resp.as_bytes()).unwrap();
+        });
+        format!("http://{}", addr)
+    }
+
+    /// The target host is unresolvable, so only a request routed through the
+    /// proxy can produce an address.
+    const UNREACHABLE_BASE_URL: &str = "http://speed.invalid";
+
+    #[tokio::test]
+    async fn external_ip_is_fetched_through_proxy() {
+        let proxy = spawn_fake_proxy("203.0.113.7");
+        let ips =
+            fetch_external_ips(UNREACHABLE_BASE_URL, None, None, Some(&proxy), None, None).await;
+        assert_eq!(ips, (Some("203.0.113.7".to_string()), None));
+    }
+
+    #[tokio::test]
+    async fn external_ip_via_proxy_is_filed_under_its_family() {
+        let proxy = spawn_fake_proxy("2001:db8::7");
+        let ips =
+            fetch_external_ips(UNREACHABLE_BASE_URL, None, None, Some(&proxy), None, None).await;
+        assert_eq!(ips, (None, Some("2001:db8::7".to_string())));
     }
 }
