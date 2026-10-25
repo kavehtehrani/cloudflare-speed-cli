@@ -341,9 +341,17 @@ pub async fn run_upload_with_loaded_latency(
                     }
                 };
                 tokio::select! {
-                    res = http.post(url.clone()).body(body).send() => {
+                    res = async {
+                        let response = http.post(url.clone()).body(body).send().await?;
+                        if !response.status().is_success() {
+                            return Ok(false);
+                        }
+                        // Read the complete response before reusing its HTTP connection.
+                        response.bytes().await?;
+                        Ok::<_, reqwest::Error>(true)
+                    } => {
                         match res {
-                            Ok(resp) if resp.status().is_success() => {}
+                            Ok(true) => {}
                             _ => {
                                 let rolled_back = counted.load(Ordering::Relaxed);
                                 total2.fetch_sub(rolled_back, Ordering::Relaxed);
@@ -469,6 +477,168 @@ pub async fn run_upload_with_loaded_latency(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::Mutex;
+
+    fn read_upload_request(reader: &mut BufReader<TcpStream>) -> std::io::Result<Option<bool>> {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(None);
+        }
+        let upload = line.starts_with("POST ");
+        loop {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "HTTP request headers ended before the blank line",
+                ));
+            }
+            if line == "\r\n" {
+                break;
+            }
+        }
+        if upload {
+            loop {
+                line.clear();
+                reader.read_line(&mut line)?;
+                let length = usize::from_str_radix(line.trim(), 16)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+                if length == 0 {
+                    line.clear();
+                    reader.read_line(&mut line)?;
+                    break;
+                }
+                let mut chunk = vec![0; length + 2];
+                reader.read_exact(&mut chunk)?;
+            }
+        }
+        Ok(Some(upload))
+    }
+
+    fn serve_delayed_uploads(
+        mut stream: TcpStream,
+        stopped: Arc<AtomicBool>,
+        uploads: Arc<Mutex<Vec<(SocketAddr, bool)>>>,
+    ) -> std::io::Result<()> {
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+        let peer = stream.peer_addr()?;
+        let mut reader = BufReader::new(stream.try_clone()?);
+        while !stopped.load(Ordering::Relaxed) {
+            let upload = match read_upload_request(&mut reader) {
+                Ok(Some(upload)) => upload,
+                Ok(None) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if upload {
+                std::thread::sleep(Duration::from_millis(10));
+                stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n",
+                )?;
+                let waiting = matches!(
+                    stream.peek(&mut [0; 1]),
+                    Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+                );
+                uploads.lock().unwrap().push((peer, waiting));
+                if !waiting {
+                    break;
+                }
+                stream.write_all(b"0\r\n\r\n")?;
+            } else {
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")?;
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_waits_for_delayed_response_and_reuses_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let stopped = Arc::new(AtomicBool::new(false));
+        let uploads = Arc::new(Mutex::new(Vec::new()));
+        let server_stopped = stopped.clone();
+        let server_uploads = uploads.clone();
+        let server = std::thread::spawn(move || {
+            let mut connections = Vec::new();
+            while !server_stopped.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let stopped = server_stopped.clone();
+                        let uploads = server_uploads.clone();
+                        connections.push(std::thread::spawn(move || {
+                            serve_delayed_uploads(stream, stopped, uploads)
+                        }));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("HTTP server could not accept a connection: {error}"),
+                }
+            }
+            for connection in connections {
+                connection.join().unwrap().unwrap();
+            }
+        });
+        let args = crate::cli::Cli::parse_from([
+            "cloudflare-speed-cli",
+            "--base-url",
+            &base_url,
+            "--concurrency",
+            "1",
+            "--upload-duration",
+            "600ms",
+            "--upload-bytes-per-req",
+            "64",
+            "--probe-interval-ms",
+            "1000",
+        ]);
+        let config = crate::cli::build_config(&args).unwrap();
+        let client = CloudflareClient::new(&config, None).await.unwrap();
+        let (events, _receiver) = mpsc::channel(128);
+        let result = run_upload_with_loaded_latency(
+            &client,
+            &config,
+            &events,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+        stopped.store(true, Ordering::Relaxed);
+        server.join().unwrap();
+        result.unwrap();
+        let uploads = uploads.lock().unwrap();
+        assert!(
+            uploads.len() >= 2,
+            "the server must receive repeated uploads"
+        );
+        assert!(
+            uploads.iter().all(|(_, waiting)| *waiting),
+            "the client must wait for each chunked response to finish"
+        );
+        let first_peer = uploads[0].0;
+        assert!(
+            uploads
+                .iter()
+                .filter(|(peer, _)| *peer == first_peer)
+                .count()
+                >= 2,
+            "the client must reuse the first upload connection: {uploads:?}"
+        );
+    }
 
     fn secs(s: u64) -> Duration {
         Duration::from_secs(s)
