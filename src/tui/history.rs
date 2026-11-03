@@ -745,6 +745,7 @@ const EXPORT_MODAL_FOOTER_LINES: u16 = 2; // blank + hint
 const EXPORT_MODAL_BORDER_OVERHEAD: u16 = 2;
 const EXPORT_MODAL_HINT_COPY: &str = "c: copy path  Esc/Enter: close";
 const EXPORT_MODAL_HINT_COPIED: &str = "\u{2713} Copied  Esc/Enter: close";
+const EXPORT_MODAL_HINT_CLOSE: &str = "Esc/Enter: close";
 
 /// Wraps a filesystem path into lines that each fit within `width` characters,
 /// preferring to break at path separators when possible.
@@ -827,8 +828,10 @@ pub fn draw_history_export_modal(area: Rect, f: &mut Frame, state: &UiState) {
     lines.push(Line::from(""));
     let hint = if state.history.export_modal_copied {
         EXPORT_MODAL_HINT_COPIED
-    } else {
+    } else if super::export::CLIPBOARD_SUPPORTED {
         EXPORT_MODAL_HINT_COPY
+    } else {
+        EXPORT_MODAL_HINT_CLOSE
     };
     let hint_color = if state.history.export_modal_copied {
         Color::Green

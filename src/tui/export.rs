@@ -1,12 +1,19 @@
 use crate::model::RunResult;
 use anyhow::{Context, Result};
+#[cfg(all(feature = "clipboard", not(target_os = "android")))]
 use std::sync::mpsc as std_mpsc;
+#[cfg(all(feature = "clipboard", not(target_os = "android")))]
 use std::sync::OnceLock;
+#[cfg(all(feature = "clipboard", not(target_os = "android")))]
 use std::time::Duration;
 
 use super::state::UiState;
 
+/// Whether this build can copy to the system clipboard.
+pub const CLIPBOARD_SUPPORTED: bool = cfg!(all(feature = "clipboard", not(target_os = "android")));
+
 // Global clipboard manager channel - initialized once on first use
+#[cfg(all(feature = "clipboard", not(target_os = "android")))]
 static CLIPBOARD_SENDER: OnceLock<std_mpsc::Sender<String>> = OnceLock::new();
 
 /// Enrich RunResult with network information from UiState.
@@ -107,27 +114,21 @@ pub fn export_result_csv(r: &RunResult, state: &UiState) -> Result<std::path::Pa
 /// Initialize the clipboard manager thread if not already initialized.
 /// This creates a background thread that processes clipboard operations sequentially,
 /// keeping each clipboard instance alive for a sufficient duration.
+#[cfg(all(feature = "clipboard", not(target_os = "android")))]
 fn init_clipboard_manager() -> Result<&'static std_mpsc::Sender<String>> {
     CLIPBOARD_SENDER.get_or_init(|| {
         let (tx, rx) = std_mpsc::channel::<String>();
 
         // Spawn a dedicated thread to manage clipboard operations
         std::thread::spawn(move || {
-            #[cfg(not(target_os = "android"))]
             use arboard::Clipboard;
 
-            #[cfg(not(target_os = "android"))]
             for text in rx {
                 if let Ok(mut clipboard) = Clipboard::new() {
                     if clipboard.set_text(&text).is_ok() {
                         std::thread::sleep(Duration::from_secs(2));
                     }
                 }
-            }
-
-            #[cfg(target_os = "android")]
-            for _ in rx {
-                // Clipboard not supported on Android.
             }
         });
 
@@ -144,13 +145,13 @@ fn init_clipboard_manager() -> Result<&'static std_mpsc::Sender<String>> {
 /// to ensure clipboard managers have time to read the contents on Linux.
 /// Returns immediately after queuing the clipboard operation, without blocking the main thread.
 pub fn copy_to_clipboard(text: &str) -> Result<()> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(not(feature = "clipboard"), target_os = "android"))]
     {
         let _ = text;
-        return Err(anyhow::anyhow!("Clipboard is not supported on Android"));
+        Err(anyhow::anyhow!("Clipboard is not supported in this build"))
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(all(feature = "clipboard", not(target_os = "android")))]
     {
         let sender = init_clipboard_manager()?;
         sender
