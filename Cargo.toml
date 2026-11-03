@@ -61,8 +61,9 @@ name = "cloudflare-speed-cli"
 path = "src/main.rs"
 
 [features]
-default = ["tui"]
-tui = ["dep:ratatui", "dep:crossterm", "dep:arboard", "dep:ratatui-textarea"]
+default = ["tui", "clipboard"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:ratatui-textarea"]
+clipboard = ["tui", "dep:arboard"]
 
 # The profile that 'dist' will build with
 [profile.dist]
